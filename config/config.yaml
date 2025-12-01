@@ -1,0 +1,84 @@
+project_name: "Vi-VQA"
+seed: 42
+
+data:
+  dataset_name: "5CD-AI/Viet-ViTextVQA-gemini-VQA"
+  data_dir: "./data"
+  image_folder: "./data/images"
+  max_length: 2048  # Increased for VLM
+  preprocessing:
+    mode: "vlm"  # Options: "baseline", "llm", "vlm"
+    image_size: 224  # For baseline model (legacy)
+    # Image resolution for Qwen3-VL (token × 32 × 32)
+    image_min_pixels: 262144  # 256 * 32 * 32
+    image_max_pixels: 1310720  # 1280 * 32 * 32
+
+model:
+  type: "vlm"  # Options: "baseline", "llm", "vlm"
+  vlm:
+    model_id: "Qwen/Qwen3-VL-8B-Instruct"
+    use_flash_attn: true
+    torch_dtype: "bfloat16"
+
+    # LoRA Configuration
+    lora:
+      enabled: true
+      rank: 128
+      alpha: 256
+      dropout: 0.05
+      target_modules: "all"  # -1 for all layers
+      vision_lora: false  # Set true to also tune vision encoder
+
+    # QLoRA Configuration (use instead of LoRA for lower memory)
+    qlora:
+      enabled: false  # Set true to use 4-bit quantization
+      bnb_4bit_compute_dtype: "bfloat16"
+      bnb_4bit_quant_type: "nf4"
+      bnb_4bit_use_double_quant: true
+
+training:
+  # Basic training config
+  num_train_epochs: 3
+  per_device_train_batch_size: 2  # Reduced for VLM
+  per_device_eval_batch_size: 2
+  gradient_accumulation_steps: 8  # Effective batch size = 2 * 8 = 16
+
+  # Learning rates
+  learning_rate: 2e-5  # LLM learning rate
+  vision_lr: 2e-6  # Vision encoder (5-10x smaller)
+  merger_lr: 2e-5  # Projector learning rate
+
+  # Optimizer
+  optim: "adamw_bnb_8bit"  # Memory efficient optimizer
+  weight_decay: 0.01
+  warmup_ratio: 0.03
+
+  # Checkpointing
+  output_dir: "./checkpoints"
+  save_strategy: "steps"
+  save_steps: 500
+  save_total_limit: 3
+
+  # Evaluation
+  eval_strategy: "steps"
+  eval_steps: 500
+
+  # Logging
+  logging_steps: 50
+  logging_dir: "./logs"
+  report_to: "tensorboard"
+
+  # DeepSpeed (optional, for multi-GPU)
+  deepspeed: null  # Set to deepspeed config path if needed
+
+  # Freezing options
+  freeze_vision_tower: true  # Only tune LLM + projector
+  freeze_llm: false
+  freeze_merger: false
+
+  # Advanced
+  fp16: false
+  bf16: true
+  gradient_checkpointing: true
+  max_grad_norm: 1.0
+  dataloader_num_workers: 4

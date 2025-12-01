@@ -1,0 +1,24 @@
+# Core dependencies
+torch>=2.0.0
+torchvision
+transformers>=4.57.0
+datasets
+pillow
+matplotlib
+pyyaml
+huggingface_hub
+
+# VLM specific
+qwen-vl-utils
+accelerate
+peft
+bitsandbytes
+scipy
+
+# Training
+deepspeed
+tensorboard
+wandb
+
+# Optional but recommended
+flash-attn  # Install separately: pip install flash-attn --no-build-isolation
