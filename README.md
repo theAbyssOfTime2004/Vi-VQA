@@ -276,7 +276,3 @@ gradient_accumulation_steps: 16
 # Check HuggingFace authentication
 huggingface-cli whoami
 ```
-
----
-
-**Happy Training! 🚀**
