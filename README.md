@@ -160,23 +160,6 @@ training:
   freeze_vision_tower: true
 ```
 
-## 💾 Hardware Requirements
-
-**Minimum (with LoRA):**
-- GPU: RTX 3090 (24GB VRAM)
-- RAM: 32GB
-- Storage: 50GB
-
-**Recommended:**
-- GPU: A100 40GB or better
-- RAM: 64GB
-- Storage: 100GB
-
-**Memory Optimization:**
-- Enable QLoRA (4-bit quantization) để giảm VRAM
-- Giảm `per_device_train_batch_size` nếu OOM
-- Enable `gradient_checkpointing`
-
 ## 📊 Evaluation Metrics
 
 - **Exact Match Accuracy:** % câu trả lời giống hệt ground truth
