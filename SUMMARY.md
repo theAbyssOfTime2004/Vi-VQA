@@ -119,25 +119,82 @@ tình không import thư viện nặng, nên `pytest` chạy trong vài giây.
 
 ---
 
+## Kết quả đo được (2026-08-23)
+
+Baseline zero-shot trên L4, 200 mẫu, greedy, `max_new_tokens=128`, không
+grounding, **không fine-tune gì**. Khác biệt duy nhất giữa hai cột là một câu
+chỉ dẫn văn phong đặt ở lượt system.
+
+| Metric | A1 — prompt trần | A2 — có chỉ dẫn văn phong | Tăng |
+|--------|-----------------:|--------------------------:|-----:|
+| exact_match | 0,50% | **23,50%** | 47× |
+| bleu | 6,85% | **60,36%** | 8,8× |
+| rouge_l | 26,06% | 69,56% | 2,7× |
+| similarity | 23,20% | 73,53% | 3,2× |
+| cider (0–10) | 0,08 | **5,25** | 66× |
+| Độ dài trung vị | 480 ký tự (10,1× đáp án chuẩn) | 40 ký tự (0,8×) | — |
+
+### Diễn giải
+
+Đọc tay 30 mẫu của A1 cho kết quả: **26/30 đúng nội dung nhưng sai văn phong**,
+3/30 sai suy luận, 1/30 sai OCR. Tức `exact_match = 0,50%` trong khi ~87% câu
+trả lời thực chất đúng — metric bề mặt sai lệch gần **170 lần** so với thực tế.
+
+Model gốc trả lời đúng rồi viết tiếp vài đoạn nữa. Ví dụ sạch nhất: hỏi số điện
+thoại, model trả về `0927 333323 - 0376877777` **giống hệt từng ký tự** đáp án
+chuẩn, nhưng bọc trong một đoạn giải thích nên mọi metric đều rớt.
+
+Hệ quả cho việc fine-tune: câu hỏi không còn là *"có đáng train không so với
+0,5%?"* mà là *"train mua thêm được gì so với 23,5% mà một dòng prompt cho
+không?"*. Phần lớn mức tăng before/after mà một run fine-tune sẽ báo cáo là
+**tuân thủ định dạng**, không phải năng lực trả lời.
+
+### OCR không phải nút thắt
+
+Giả thuyết ban đầu cho rằng scene-text tiếng Việt là chỗ yếu. Dữ liệu bác bỏ:
+model đọc chính xác `invaquangcaochuyennghiep.com`, `0927 333323 - 0376877777`,
+`KM 944 + 937,11`, `0931.16.61.16`. Chỉ 1/30 lỗi OCR thật (`VIETGAP` đọc thành
+`VƯƠNG CÁP`).
+
+### Nói dài thì bịa
+
+Trong A1, model tự mâu thuẫn về cùng một tấm ảnh: mẫu 110_0 nói Cầu Thanh Quýt
+ở Hà Nam, mẫu 110_1 nói Bình Thuận. Mẫu 102_1 bịa nguyên tiểu sử cho một
+thương hiệu nó đọc sai tên. Mẫu 101_0 rơi vào vòng lặp thoái hoá, sinh rác cho
+đến khi hết token.
+
+Cả ba biến mất ở A2. **Câu ngắn thì ít chỗ để bịa** — nên "chỉ học định dạng"
+không thuần tuý mỹ phẩm: nó cắt bề mặt hallucination.
+
+### Nhãn có nhiễu
+
+~10% mẫu đọc tay có nhãn hỏng hoặc câu hỏi mơ hồ (`104_1` hỏi "Mỳ gạo chũ được
+làm gì?" với đáp án "được HTX sản xuất và tiêu thụ"; `105_0` hỏi "Bức hình này
+của ai?"), cộng câu hỏi trùng lặp (`108_0` và `108_1`). Trần thực tế của
+exact_match vì thế vào khoảng 85–90%, không phải 100%.
+
+### Cảnh báo phương pháp
+
+Hai con số trên đều đo trên split `train` và prompt được chọn trên chính tập
+đó. Với số liệu công bố, hãy chọn prompt trên `train` rồi báo cáo trên `val`
+hoặc `test` (`vivqa eval --split val`).
+
+---
+
 ## Trạng thái
 
-Pipeline sẵn sàng, **model chưa được train**, và chưa có kết quả đo nào.
+Pipeline sẵn sàng, **model chưa được train**.
 
-Bước tiếp theo nên là **baseline zero-shot**, không phải training:
+Baseline ở trên đã đo xong (`notebooks/baseline_a1.ipynb`). Việc còn lại:
 
-```bash
-vivqa prepare --limit 400 --set data.streaming=true
-vivqa eval --model-path Qwen/Qwen3-VL-8B-Instruct \
-           --split train --num-samples 200 --output ./results/baseline.json
-```
-
-Lý do: Qwen3-VL-8B đã mạnh sẵn ở tác vụ này. Nếu base model trả lời đúng nội
-dung mà chỉ khác văn phong so với đáp án Gemini, thì chênh lệch before/after
-chủ yếu là *superficial alignment* — học cách nói, không phải học năng lực — và
-một run 8–20 giờ không mua thêm được gì. Đọc tay 30 mẫu quyết định điều đó rẻ
-hơn nhiều so với train rồi mới biết.
-
-`notebooks/baseline_a1.ipynb` chạy trọn quy trình này.
+1. **Tinh chỉnh prompt.** Đáp án Gemini theo khuôn cứng: nhắc lại chủ ngữ câu
+   hỏi rồi nêu đáp án (*"Tên của hàng này là Anytime."*). A2 trả lời cộc hơn
+   đáp án chuẩn (40 so với 48 ký tự) vì prompt bảo "không giải thích". Mô tả
+   đúng khuôn này có thể đẩy exact_match lên 35–45% — vẫn không train gì.
+2. **LoRA nhỏ** (~1.500 mẫu, 1 epoch, 1–2 giờ) để đo phần dư mà prompt không
+   lấy được. Đây là con số trung thực về giá trị của fine-tune, chứ không phải
+   phép so với baseline trần.
+3. **Full fine-tune 8–20 giờ**: dữ liệu hiện có không biện minh được.
 
 ### Hướng mở rộng
 
