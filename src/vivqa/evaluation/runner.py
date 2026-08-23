@@ -29,14 +29,23 @@ def load_split(path: str) -> list[dict[str, Any]]:
 def messages_from_sample(
     sample: Mapping[str, Any],
     image_folder: str,
+    system_prompt: str = "",
 ) -> list[dict[str, Any]]:
     """Rebuild the chat messages stored in a prepared sample.
 
     The prompt is replayed exactly as written into the split file — any
     grounding it carries included — so evaluation measures the model on
     the prompt format it was trained on.
+
+    `system_prompt` is prepended as a style-only turn. It is what makes a
+    prompt-engineered baseline measurable: the same stored questions, the
+    same model, one instruction about answer format and nothing else. It
+    carries no information about the image, so a score change is
+    attributable to style alone.
     """
     messages: list[dict[str, Any]] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": [{"type": "text", "text": system_prompt}]})
 
     for turn in sample["conversations"]:
         speaker = turn.get("from")
@@ -107,7 +116,11 @@ def evaluate(
     for index, sample in enumerate(samples):
         reference = reference_of(sample)
         try:
-            messages = messages_from_sample(sample, config.data.image_folder)
+            messages = messages_from_sample(
+                sample,
+                config.data.image_folder,
+                system_prompt=config.inference.system_prompt,
+            )
             prediction = model.generate(messages, temperature=settings.temperature)
         except Exception as error:  # noqa: BLE001 - one bad sample must not end the run
             logger.warning("sample %s failed: %s", sample.get("id", index), error)
@@ -136,6 +149,10 @@ def evaluate(
         "num_samples": len(predictions),
         "num_failed": failures,
         "grounding_enabled": config.data.grounding.enabled,
+        # Recorded so two result files can be told apart later: a score is
+        # meaningless without knowing which prompt produced it.
+        "system_prompt": config.inference.system_prompt,
+        "max_new_tokens": config.inference.max_new_tokens,
         "metrics": scores,
         "predictions": records,
     }

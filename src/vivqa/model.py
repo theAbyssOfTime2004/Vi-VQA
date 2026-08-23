@@ -147,6 +147,9 @@ class VQAModel:
         prompt = apply_grounding(question, description, self.config.data.grounding)
 
         messages: list[dict[str, Any]] = []
+        style = self.config.inference.system_prompt
+        if style:
+            messages.append({"role": "system", "content": [{"type": "text", "text": style}]})
         if prompt.system:
             messages.append(
                 {"role": "system", "content": [{"type": "text", "text": prompt.system}]}

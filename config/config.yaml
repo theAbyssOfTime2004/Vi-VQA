@@ -109,6 +109,12 @@ inference:
   temperature: 0.7
   top_p: 0.9
 
+  # Style-only system turn — says how to answer, never what is in the image.
+  # Deliberately separate from data.grounding, which supplies facts: mixing
+  # the two makes it impossible to attribute a score change to either.
+  # e.g. "Trả lời ngắn gọn bằng tiếng Việt, đúng một câu, không giải thích."
+  system_prompt: ""
+
 evaluation:
   split: "val"
   num_samples: 200                               # -1 for the whole split

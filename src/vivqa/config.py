@@ -280,6 +280,12 @@ class InferenceConfig:
     temperature: float = 0.7
     top_p: float = 0.9
 
+    # A system turn that shapes *how* the model answers, carrying no
+    # information about the image. Kept separate from data.grounding on
+    # purpose: grounding hands the model facts, this only sets style, and
+    # mixing them makes it impossible to tell which one moved a score.
+    system_prompt: str = ""
+
     def validate(self, path: str) -> None:
         if self.max_new_tokens < 1:
             raise ConfigError(

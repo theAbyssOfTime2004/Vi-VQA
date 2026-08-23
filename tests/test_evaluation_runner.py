@@ -144,3 +144,60 @@ class TestEvaluate:
     def test_missing_split_file_is_reported(self, config):
         with pytest.raises(FileNotFoundError, match="vivqa prepare"):
             evaluate(FakeModel(), config, split="val")
+
+
+class TestStyleSystemPrompt:
+    def test_no_system_turn_when_unset(self):
+        assert messages_from_sample(sample(), "/img")[0]["role"] == "user"
+
+    def test_style_prompt_becomes_the_first_turn(self):
+        messages = messages_from_sample(sample(), "/img", system_prompt="Trả lời ngắn gọn.")
+        assert messages[0]["role"] == "system"
+        assert messages[0]["content"][0]["text"] == "Trả lời ngắn gọn."
+
+    def test_style_prompt_precedes_a_grounding_turn(self):
+        messages = messages_from_sample(
+            sample(with_system=True), "/img", system_prompt="Trả lời ngắn gọn."
+        )
+        assert [m["role"] for m in messages] == ["system", "system", "user"]
+        # Style first, then the grounding context it applies to.
+        assert messages[0]["content"][0]["text"] == "Trả lời ngắn gọn."
+        assert "Chợ Bến Thành" in messages[1]["content"][0]["text"]
+
+    def test_question_is_untouched_by_the_style_prompt(self):
+        messages = messages_from_sample(sample(), "/img", system_prompt="Trả lời ngắn gọn.")
+        assert messages[-1]["content"][-1]["text"] == "Đây là gì?"
+
+
+class TestResultProvenance:
+    def test_prompt_settings_are_recorded_in_the_results(self, tmp_path):
+        # Two runs differing only by prompt must be distinguishable later.
+        config = Config()
+        config.data.data_dir = str(tmp_path)
+        config.data.image_folder = str(tmp_path / "images")
+        config.inference.system_prompt = "Trả lời ngắn gọn."
+        config.inference.max_new_tokens = 128
+
+        from vivqa.data.prepare import prepare
+
+        prepare(config, records=[{"id": 0, "description": "x", "conversations": [
+            {"role": "user", "content": "Q"}, {"role": "assistant", "content": "A"}]}])
+
+        result = evaluate(FakeModel(), config, split="train")
+        assert result["system_prompt"] == "Trả lời ngắn gọn."
+        assert result["max_new_tokens"] == 128
+
+    def test_style_prompt_reaches_the_model(self, tmp_path):
+        config = Config()
+        config.data.data_dir = str(tmp_path)
+        config.data.image_folder = str(tmp_path / "images")
+        config.inference.system_prompt = "Một câu duy nhất."
+
+        from vivqa.data.prepare import prepare
+
+        prepare(config, records=[{"id": 0, "description": "x", "conversations": [
+            {"role": "user", "content": "Q"}, {"role": "assistant", "content": "A"}]}])
+
+        model = FakeModel()
+        evaluate(model, config, split="train")
+        assert model.seen[0][0]["role"] == "system"
