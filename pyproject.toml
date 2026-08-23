@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vivqa"
+version = "0.2.0"
+description = "Vietnamese Visual Question Answering with Qwen3-VL"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+# Core deps are deliberately light: the config, data-preparation and
+# evaluation layers must be importable (and testable) without CUDA,
+# torch or transformers installed.
+dependencies = [
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# Everything needed to turn the HuggingFace dataset into training files.
+data = [
+    "datasets>=3.0.0",
+    "pillow>=10.0.0",
+    "huggingface_hub>=0.26.0",
+    "tqdm",
+]
+# Everything needed to run the model. transformers>=4.57 is a hard
+# requirement: Qwen3VLForConditionalGeneration does not exist before it.
+infer = [
+    "torch>=2.0.0",
+    "torchvision",
+    "transformers>=4.57.0",
+    "accelerate>=0.34.0",
+    "qwen-vl-utils>=0.0.8",
+    "peft>=0.13.0",
+]
+train = [
+    "vivqa[data,infer]",
+    "bitsandbytes>=0.44.0",
+    "deepspeed>=0.15.0",
+    "tensorboard",
+]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.scripts]
+vivqa = "vivqa.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

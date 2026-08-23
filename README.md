@@ -1,261 +1,162 @@
-# Vi-VQA: Vietnamese Visual Question Answering with Qwen3-VL
+# Vi-VQA: Visual Question Answering tiếng Việt với Qwen3-VL
 
-Dự án Visual Question Answering (VQA) cho tiếng Việt sử dụng **Qwen3-VL-8B-Instruct** - một trong những Vision Language Model mạnh nhất hiện tại.
+Fine-tune **Qwen3-VL-8B-Instruct** bằng LoRA trên
+[Viet-ViTextVQA-gemini-VQA](https://huggingface.co/datasets/5CD-AI/Viet-ViTextVQA-gemini-VQA)
+— 9.594 ảnh, 31.420 cặp hỏi–đáp về di tích, biển hiệu và sản phẩm Việt Nam.
 
-## 📊 Dataset
-
-**Viet-ViTextVQA-gemini-VQA** ([HuggingFace](https://huggingface.co/datasets/5CD-AI/Viet-ViTextVQA-gemini-VQA))
-- **9,594 images** từ ViTextVQA dataset
-- **31,420 QA pairs** được sinh bởi Google Gemini 1.5 Flash
-- Domain: Di tích lịch sử Việt Nam, landmarks, sản phẩm, v.v.
-- Multi-turn conversations với câu trả lời generative
-
-### Dataset Statistics (từ EDA):
-```
-- Trung bình 3.27 QA pairs/image
-- Độ dài câu hỏi: ~37 ký tự
-- Độ dài câu trả lời: ~49 ký tự
-- 39,886 unique answers → Generative task, không phải classification
-```
-
-## 🏗️ Architecture
-
-**Model:** Qwen3-VL-8B-Instruct
-- **Vision Encoder:** ViT-based visual encoder
-- **Language Model:** 8B parameter Qwen3 LLM
-- **Multimodal Fusion:** Vision-language projector
-- **Context Length:** 256K native, expandable to 1M tokens
-- **OCR Support:** 32 languages including Vietnamese
-
-**Fine-tuning Strategy:**
-- LoRA (Low-Rank Adaptation) với rank=128
-- Freeze vision encoder, chỉ tune LLM + projector
-- Batch size: 2 × 8 gradient accumulation = 16 effective
-- Learning rate: 2e-5 (LLM), 2e-6 (vision)
-
-## 🚀 Quick Start
-
-### 1. Setup Environment
+## Cài đặt
 
 ```bash
-# Clone repository
-git clone <your-repo-url>
-cd Vi-VQA
+git clone <repo-url> && cd Vi-VQA
+python3 -m venv .venv && source .venv/bin/activate
 
-# Run setup script
-bash setup_vlm.sh
+pip install -e '.[train]'                 # data + inference + training
+pip install flash-attn --no-build-isolation   # tuỳ chọn, nhanh hơn đáng kể
 
-# Or manual installation:
-python3 -m venv Vi-VQA
-source Vi-VQA/bin/activate
-pip install -r requirements.txt
-pip install flash-attn --no-build-isolation
+huggingface-cli login                     # dataset là gated, cần request access
 ```
 
-### 2. Login to HuggingFace
+`transformers>=4.57.0` là yêu cầu bắt buộc, không phải khuyến nghị:
+`Qwen3VLForConditionalGeneration` không tồn tại ở bản thấp hơn.
+
+## Dùng
+
+Mọi thứ đi qua một CLI duy nhất. Hyperparameter nằm ở `config/config.yaml`,
+không rải trong code, và `--set` cho phép override tại chỗ.
 
 ```bash
-huggingface-cli login
-# Enter your token: hf_...
+vivqa config                              # in ra cấu hình đã resolve
+vivqa prepare                             # HF dataset -> train/val/test JSON + ảnh
+vivqa train                               # fine-tune LoRA
+vivqa eval --model-path ./checkpoints/qwen3vl-vivqa/checkpoint-1500
+vivqa chat --model-path ./checkpoints/qwen3vl-vivqa/checkpoint-1500
 ```
-
-Hoặc trong Python:
-```python
-from huggingface_hub import login
-login(token="hf_...")
-```
-
-### 3. Prepare Dataset
 
 ```bash
-# Convert dataset to Qwen3-VL format
-python src/dataset_vlm.py
+# Ví dụ override
+vivqa prepare --limit 100                          # thử nhanh trên 100 record
+vivqa train --dry-run                              # in lệnh train, không chạy
+vivqa train --num-gpus 4 --set training.num_train_epochs=3
+vivqa eval --model-path <ckpt> --num-samples -1 --output results.json
 ```
 
-Kết quả:
-- `data/train.json`: Training data in Qwen-VL format
-- `data/images/`: Extracted images
-
-### 4. Train Model
+Chạy trên Modal:
 
 ```bash
-# Start training with LoRA
-bash scripts/train_qwen3vl.sh
+modal secret create huggingface-secret HF_TOKEN=hf_...
+modal run scripts/train_on_modal.py --step all
+modal run scripts/train_on_modal.py::check_status
 ```
 
-Training sẽ:
-- Clone Qwen-VL-Series-Finetune repository
-- Train với LoRA adapters
-- Save checkpoints mỗi 500 steps
-- Log to TensorBoard
+Modal và local dùng **chung** module sinh lệnh train, nên hai đường chạy không
+thể lệch nhau.
 
-**Xem training progress:**
-```bash
-tensorboard --logdir ./checkpoints/qwen3vl-vivqa/runs
-```
+## Knowledge grounding
 
-### 5. Inference
-
-**Interactive mode:**
-```bash
-python src/inference_qwen3vl.py \
-    --model_path ./checkpoints/qwen3vl-vivqa \
-    --mode interactive
-```
-
-**Evaluation mode:**
-```bash
-python src/inference_qwen3vl.py \
-    --model_path ./checkpoints/qwen3vl-vivqa \
-    --mode eval \
-    --test_data ./data/test.json \
-    --output ./predictions.json
-```
-
-## 📁 Project Structure
-
-```
-Vi-VQA/
-├── config/
-│   └── config.yaml              # Configuration file
-├── data/
-│   ├── images/                  # Extracted images
-│   ├── train.json              # Training data (Qwen-VL format)
-│   └── test.json               # Test data
-├── src/
-│   ├── dataset_vlm.py          # Dataset processor for VLM
-│   ├── inference_qwen3vl.py    # Inference script
-│   ├── utils.py                # Utilities
-│   └── vocab.py                # (Legacy, not used for VLM)
-├── scripts/
-│   └── train_qwen3vl.sh        # Training script
-├── notebooks/
-│   └── eda.ipynb               # Exploratory Data Analysis
-├── checkpoints/                 # Model checkpoints
-├── logs/                        # Training logs
-├── requirements.txt            # Python dependencies
-├── setup_vlm.sh               # Environment setup script
-└── README.md                   # This file
-```
-
-## ⚙️ Configuration
-
-Edit `config/config.yaml` để thay đổi hyperparameters:
-
-```yaml
-model:
-  vlm:
-    model_id: "Qwen/Qwen3-VL-8B-Instruct"
-    lora:
-      enabled: true
-      rank: 128
-      alpha: 256
-      dropout: 0.05
-
-training:
-  num_train_epochs: 3
-  per_device_train_batch_size: 2
-  gradient_accumulation_steps: 8
-  learning_rate: 2e-5
-  freeze_vision_tower: true
-```
-
-## 📊 Evaluation Metrics
-
-- **Exact Match Accuracy:** % câu trả lời giống hệt ground truth
-- **BLEU Score:** Độ tương đồng n-gram
-- **ROUGE Score:** Recall-oriented overlap
-- **CIDEr:** Consensus-based metric
-
-## 🔬 EDA Insights
-
-Từ `notebooks/eda.ipynb`:
-
-1. **Dataset không phù hợp cho Classification:**
-   - Top 1000 answers chỉ cover 4.88% dataset
-   - Top 5000 answers chỉ cover 17.61%
-   - → Cần generative model
-
-2. **Phân bố Conversations:**
-   - Không balanced: phần lớn images có 2-3 QA pairs
-   - Long-tail: một số ít có >10 QA pairs
-
-3. **Text Statistics:**
-   - Câu hỏi ngắn (~5-8 từ)
-   - Câu trả lời đa dạng (1-100+ từ)
-   - max_length=2048 là đủ
-
-## 🛠️ Advanced Usage
-
-### Train with QLoRA (4-bit)
-
-Edit `config.yaml`:
-```yaml
-model:
-  vlm:
-    qlora:
-      enabled: true
-```
-
-### Multi-GPU Training
+Dataset có sẵn trường `description` (~558 ký tự/ảnh) mà Gemini đã dùng để viết
+câu trả lời — tức là kiến thức nằm sẵn trong dữ liệu nhưng trước đây bị bỏ phí
+hoàn toàn. Bật nó lên:
 
 ```bash
-# Use DeepSpeed
-deepspeed --num_gpus=4 \
-    Qwen-VL-Series-Finetune/train.py \
-    --deepspeed ds_config_zero2.json \
-    ...
+vivqa prepare --set data.grounding.enabled=true
 ```
 
-### Merge LoRA Weights
+Chi tiết, hai chế độ `prefix`/`system`, và quy trình A/B để đo tác động:
+[`docs/GROUNDING.md`](docs/GROUNDING.md).
+
+## Cấu trúc
+
+```
+config/config.yaml          # nguồn cấu hình duy nhất cho mọi đường chạy
+src/vivqa/
+  config.py                 # load + validate config thành dataclass
+  cli.py                    # vivqa prepare | train | eval | chat | config
+  model.py                  # nạp Qwen3-VL, sinh câu trả lời
+  data/
+    prepare.py              # HF dataset -> JSON theo format Qwen-VL
+    grounding.py            # ngữ cảnh từ description
+  train/
+    command.py              # config -> argv cho trainer
+    runner.py               # clone trainer repo và chạy
+  evaluation/
+    metrics.py              # exact match, similarity, BLEU, ROUGE-L, CIDEr
+    runner.py               # sinh dự đoán và chấm điểm
+scripts/
+  train_qwen3vl.sh          # wrapper mỏng cho chạy local
+  train_on_modal.py         # phần thuộc về Modal, không chứa logic dataset
+tests/                      # 118 test, chạy không cần GPU
+notebooks/eda.ipynb         # phân tích dataset
+```
+
+## Kiến trúc
+
+**Model:** Qwen3-VL-8B-Instruct — vision encoder ViT, LLM 8B, projector
+vision-language, hỗ trợ OCR 32 ngôn ngữ trong đó có tiếng Việt.
+
+**Fine-tune:** LoRA rank 128 / alpha 256 trên LLM và projector, đóng băng vision
+encoder. Batch hiệu dụng 16 (1 × 16 gradient accumulation), bf16, gradient
+checkpointing — vừa 24GB VRAM.
+
+**Vì sao generative chứ không phải classification:** EDA (`notebooks/eda.ipynb`)
+cho thấy 39.886 câu trả lời unique, top-5000 chỉ cover 17,6% dataset. Không có
+tập nhãn cố định nào phủ nổi bài toán này.
+
+Training thực tế được giao cho
+[`2U1/Qwen-VL-Series-Finetune`](https://github.com/2U1/Qwen-VL-Series-Finetune);
+repo này lo dữ liệu, cấu hình và đánh giá.
+
+## Đánh giá
+
+```
+exact_match   % trùng khít sau khi chuẩn hoá (NFC, lowercase, bỏ dấu câu)
+similarity    % tương đồng mức ký tự
+bleu          BLEU-4 mức corpus, có smoothing
+rouge_l       F-measure trên LCS, beta=1.2
+cider         CIDEr-D, thang 0–10
+```
+
+Chỉ dùng exact match cho bài toán này là vô nghĩa: câu trả lời trung bình ~49 ký
+tự tiếng Việt tự do, một câu đúng nhưng diễn đạt khác sẽ được 0 điểm. Các metric
+còn lại chấm điểm từng phần.
+
+Chuẩn hoá NFC không phải chi tiết thẩm mỹ: "à" có thể được lưu bằng một codepoint
+hoặc bằng "a" cộng dấu huyền tổ hợp. Hai dạng hiển thị y hệt nhau, so sánh ra
+khác nhau, và dataset có cả hai.
+
+## Phát triển
 
 ```bash
-cd Qwen-VL-Series-Finetune
-bash scripts/merge_lora.sh
+pip install -e '.[dev]'
+pytest                       # 118 test, không cần torch/transformers
 ```
 
-## 📚 References
+Tầng config, data và metrics cố tình không import torch, nên test chạy trong vài
+giây trên máy không GPU.
 
-- **Qwen3-VL:** [HuggingFace](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct)
-- **Dataset:** [Viet-ViTextVQA-gemini-VQA](https://huggingface.co/datasets/5CD-AI/Viet-ViTextVQA-gemini-VQA)
-- **Fine-tuning Repo:** [Qwen-VL-Series-Finetune](https://github.com/2U1/Qwen-VL-Series-Finetune)
-- **ViTextVQA Paper:** [arXiv:2404.10652](https://arxiv.org/abs/2404.10652)
+## Yêu cầu phần cứng
 
-## 🤝 Contributing
+| GPU | Cấu hình | Thời gian (2 epoch) |
+|-----|----------|---------------------|
+| RTX 3080 (10GB) | QLoRA 4-bit | ~30h |
+| RTX 3090 (24GB) | LoRA | ~20–25h |
+| A100 (40GB) | LoRA | ~8–12h |
+| H100 | LoRA | ~4–6h |
 
-Contributions welcome! Please:
-1. Fork the repo
-2. Create a feature branch
-3. Submit a pull request
+Hết VRAM thì giảm `image_max_pixels` trước, rồi mới tới batch size:
 
-## 📄 License
-
-MIT License (hoặc license của bạn)
-
-## ⚠️ Notes
-
-- Qwen3-VL requires transformers>=4.57.0 (install from source)
-- Flash Attention 2 highly recommended cho tốc độ
-- Dataset là gated, cần request access trên HuggingFace
-- Training với full dataset (~30k samples) mất ~10-15 giờ trên A100
-
-## 🆘 Troubleshooting
-
-**OOM Error:**
 ```bash
-# Giảm batch size hoặc enable QLoRA
-per_device_train_batch_size: 1
-gradient_accumulation_steps: 16
+vivqa train --set model.image_max_pixels=589824 \
+            --set training.gradient_accumulation_steps=32
 ```
 
-**Flash Attention Error:**
-```bash
-# Disable flash attention
---disable_flash_attn2 true
-```
+## Tham khảo
 
-**Dataset Loading Error:**
-```bash
-# Check HuggingFace authentication
-huggingface-cli whoami
-```
+- [Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct)
+- [Viet-ViTextVQA-gemini-VQA](https://huggingface.co/datasets/5CD-AI/Viet-ViTextVQA-gemini-VQA)
+- [Qwen-VL-Series-Finetune](https://github.com/2U1/Qwen-VL-Series-Finetune)
+- [ViTextVQA paper — arXiv:2404.10652](https://arxiv.org/abs/2404.10652)
+- [LoRA — arXiv:2106.09685](https://arxiv.org/abs/2106.09685)
+
+## Giấy phép
+
+MIT

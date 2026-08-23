@@ -1,3 +1,11 @@
+# Vi-VQA configuration.
+#
+# This file is the single source of truth. Every entry point reads it:
+#   vivqa prepare / vivqa train / vivqa eval / vivqa chat
+#   scripts/train_qwen3vl.sh  (local)
+#   scripts/train_on_modal.py (Modal)
+# Nothing below is duplicated in code — override with --set key=value.
+
 project_name: "Vi-VQA"
 seed: 42
 
@@ -5,80 +13,99 @@ data:
   dataset_name: "5CD-AI/Viet-ViTextVQA-gemini-VQA"
   data_dir: "./data"
   image_folder: "./data/images"
-  max_length: 2048  # Increased for VLM
-  preprocessing:
-    mode: "vlm"  # Options: "baseline", "llm", "vlm"
-    image_size: 224  # For baseline model (legacy)
-    # Image resolution for Qwen3-VL (token × 32 × 32)
-    image_min_pixels: 262144  # 256 * 32 * 32
-    image_max_pixels: 1310720  # 1280 * 32 * 32
+  image_quality: 95
+
+  # Fractions must sum to 1.0. Splitting happens at the *image* level so
+  # QA pairs from one image never straddle the train/val boundary.
+  splits:
+    train: 0.90
+    val: 0.05
+    test: 0.05
+
+  # Knowledge grounding: the dataset ships a ~558-char `description` per
+  # image that Gemini used to write the answers. Feeding it back in turns
+  # the task from "recall this landmark" into "read this context".
+  # Set enabled: true to build a grounded copy of the data.
+  grounding:
+    enabled: false
+    mode: "prefix"        # prefix = inline in the user turn, system = separate system turn
+    max_chars: 1200       # descriptions longer than this are truncated on a sentence boundary
+    # 'prefix' mode: context + question in one user turn.
+    template: "Thông tin tham khảo về bức ảnh:\n{description}\n\nDựa vào ảnh và thông tin trên, hãy trả lời: {question}"
+    # 'system' mode: context only, question stays in the user turn.
+    system_template: "Thông tin tham khảo về bức ảnh:\n{description}"
 
 model:
-  type: "vlm"  # Options: "baseline", "llm", "vlm"
-  vlm:
-    model_id: "Qwen/Qwen3-VL-8B-Instruct"
-    use_flash_attn: true
-    torch_dtype: "bfloat16"
+  model_id: "Qwen/Qwen3-VL-8B-Instruct"
+  torch_dtype: "bfloat16"
+  use_flash_attn: true
 
-    # LoRA Configuration
-    lora:
-      enabled: true
-      rank: 128
-      alpha: 256
-      dropout: 0.05
-      target_modules: "all"  # -1 for all layers
-      vision_lora: false  # Set true to also tune vision encoder
+  # Qwen3-VL packs pixels into 32x32 patches; these bounds are in pixels.
+  image_min_pixels: 262144    # 256 * 32 * 32
+  image_max_pixels: 1310720   # 1280 * 32 * 32
 
-    # QLoRA Configuration (use instead of LoRA for lower memory)
-    qlora:
-      enabled: false  # Set true to use 4-bit quantization
-      bnb_4bit_compute_dtype: "bfloat16"
-      bnb_4bit_quant_type: "nf4"
-      bnb_4bit_use_double_quant: true
+  lora:
+    enabled: true
+    rank: 128
+    alpha: 256
+    dropout: 0.05
+    num_lora_modules: -1                          # -1 = every eligible module
+    namespan_exclude: ["lm_head", "embed_tokens"]
+    vision_lora: false
+
+  qlora:
+    enabled: false
+    bnb_4bit_compute_dtype: "bfloat16"
+    bnb_4bit_quant_type: "nf4"
+    bnb_4bit_use_double_quant: true
 
 training:
-  # Basic training config
-  num_train_epochs: 3
-  per_device_train_batch_size: 2  # Reduced for VLM
-  per_device_eval_batch_size: 2
-  gradient_accumulation_steps: 8  # Effective batch size = 2 * 8 = 16
+  output_dir: "./checkpoints/qwen3vl-vivqa"
+  num_train_epochs: 2
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 16               # effective batch = 1 * 16
 
-  # Learning rates
-  learning_rate: 2e-5  # LLM learning rate
-  vision_lr: 2e-6  # Vision encoder (5-10x smaller)
-  merger_lr: 2e-5  # Projector learning rate
-
-  # Optimizer
-  optim: "adamw_bnb_8bit"  # Memory efficient optimizer
-  weight_decay: 0.01
+  learning_rate: 2.0e-5                          # LLM
+  vision_lr: 2.0e-6                              # vision tower, 10x smaller
+  merger_lr: 2.0e-5                              # vision-language projector
+  lr_scheduler_type: "cosine"
+  weight_decay: 0.1
   warmup_ratio: 0.03
+  max_grad_norm: 1.0
 
-  # Checkpointing
-  output_dir: "./checkpoints"
-  save_strategy: "steps"
-  save_steps: 500
-  save_total_limit: 3
+  optim: "adamw_bnb_8bit"
+  bf16: true
+  fp16: false
+  tf32: true
+  gradient_checkpointing: true
+  dataloader_num_workers: 4
+  lazy_preprocess: true
 
-  # Evaluation
-  eval_strategy: "steps"
-  eval_steps: 500
-
-  # Logging
-  logging_steps: 50
-  logging_dir: "./logs"
-  report_to: "tensorboard"
-
-  # DeepSpeed (optional, for multi-GPU)
-  deepspeed: null  # Set to deepspeed config path if needed
-
-  # Freezing options
-  freeze_vision_tower: true  # Only tune LLM + projector
+  freeze_vision_tower: true
   freeze_llm: false
   freeze_merger: false
 
-  # Advanced
-  fp16: false
-  bf16: true
-  gradient_checkpointing: true
-  max_grad_norm: 1.0
-  dataloader_num_workers: 4
+  save_strategy: "steps"
+  save_steps: 500
+  save_total_limit: 3
+  eval_strategy: "steps"
+  eval_steps: 500
+  load_best_model_at_end: true
+  metric_for_best_model: "eval_loss"
+  greater_is_better: false
+
+  logging_steps: 50
+  report_to: "tensorboard"
+  deepspeed: "scripts/zero2.json"                # null to disable
+
+inference:
+  max_new_tokens: 512
+  temperature: 0.7
+  top_p: 0.9
+
+evaluation:
+  split: "val"
+  num_samples: 200                               # -1 for the whole split
+  temperature: 0.0                               # greedy: eval must be reproducible
+  metrics: ["exact_match", "similarity", "bleu", "rouge_l", "cider"]

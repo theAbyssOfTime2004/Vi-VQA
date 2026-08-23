@@ -1,59 +1,49 @@
 #!/bin/bash
+#
+# Set up a local environment for Vi-VQA.
+#
+#   bash setup_vlm.sh
+#
+# Dependencies are declared in pyproject.toml, not here — this script only
+# creates the virtualenv and installs the extras.
 
-# Setup script for Qwen3-VL training environment
-# Usage: bash setup_vlm.sh
+set -euo pipefail
 
-set -e
+cd "$(dirname "$0")"
 
-echo "🚀 Setting up Vi-VQA with Qwen3-VL..."
+echo "🚀 Setting up Vi-VQA"
 
-# Check CUDA version
 if command -v nvcc &> /dev/null; then
-    echo "✓ CUDA found: $(nvcc --version | grep release | sed 's/.*release //' | sed 's/,.*//')"
+    echo "✓ CUDA $(nvcc --version | grep release | sed 's/.*release //; s/,.*//')"
 else
-    echo "⚠️  CUDA not found. This is required for training."
+    echo "⚠️  No CUDA toolkit found. Training needs a GPU; inference will be very slow without one."
 fi
 
-# Activate virtual environment
-if [ -d "Vi-VQA" ]; then
-    echo "✓ Virtual environment found"
-    source Vi-VQA/bin/activate
-else
-    echo "Creating virtual environment..."
-    python3 -m venv Vi-VQA
-    source Vi-VQA/bin/activate
+if [ ! -d ".venv" ]; then
+    echo "Creating .venv..."
+    python3 -m venv .venv
 fi
+source .venv/bin/activate
 
-# Upgrade pip
-echo "Upgrading pip..."
 pip install --upgrade pip
 
-# Install PyTorch with CUDA support
-echo "Installing PyTorch..."
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+# Qwen3-VL needs transformers>=4.57; pyproject pins that. Install torch with
+# the CUDA wheels first so pip does not resolve to the CPU build.
+echo "Installing PyTorch (CUDA 12.1 wheels)..."
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 
-# Install transformers from source (required for Qwen3-VL)
-echo "Installing transformers from source..."
-pip install git+https://github.com/huggingface/transformers
+echo "Installing vivqa and its training extras..."
+pip install -e '.[train,dev]'
 
-# Install core dependencies
-echo "Installing core dependencies..."
-pip install -r requirements.txt
+echo "Installing Flash Attention 2 (optional)..."
+pip install flash-attn --no-build-isolation || \
+    echo "⚠️  Flash Attention unavailable — set model.use_flash_attn: false in config/config.yaml"
 
-# Install flash-attention (optional but highly recommended)
-echo "Installing Flash Attention 2..."
-pip install flash-attn --no-build-isolation || echo "⚠️  Flash Attention installation failed. You can continue without it."
-
-# Install qwen-vl-utils
-echo "Installing qwen-vl-utils..."
-pip install qwen-vl-utils
-
-echo ""
-echo "✅ Setup complete!"
-echo ""
-echo "Next steps:"
-echo "1. Activate environment: source Vi-VQA/bin/activate"
-echo "2. Login to HuggingFace: huggingface-cli login"
-echo "3. Prepare dataset: python src/dataset_vlm.py"
-echo "4. Start training: bash scripts/train_qwen3vl.sh"
-echo ""
+echo
+echo "✅ Done."
+echo
+echo "Next:"
+echo "  source .venv/bin/activate"
+echo "  huggingface-cli login      # the dataset is gated"
+echo "  vivqa prepare"
+echo "  vivqa train"
