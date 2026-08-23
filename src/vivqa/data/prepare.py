@@ -30,6 +30,7 @@ __all__ = [
     "build_samples",
     "extract_qa_pairs",
     "image_filename",
+    "load_records",
     "prepare",
     "write_split",
 ]
@@ -167,6 +168,32 @@ def _save_image(image: Any, path: str, quality: int) -> bool:
         return False
 
 
+def load_records(data: DataConfig, limit: int | None = None) -> Iterable[Mapping[str, Any]]:
+    """Fetch the dataset records.
+
+    With `data.streaming` the split is walked lazily instead of downloaded
+    in full first. Combined with `limit` that is the difference between a
+    few hundred MB and several GB — which is what makes a baseline run fit
+    on a Colab or Kaggle disk.
+    """
+    from datasets import load_dataset  # imported lazily: heavy dependency
+
+    if data.streaming:
+        if limit is None:
+            # Streaming without a limit still walks every record; it only
+            # saves the up-front download. Worth saying so, because the
+            # run will not look any faster.
+            logger.warning(
+                "streaming without --limit still iterates the whole split; "
+                "it only avoids the up-front download"
+            )
+        logger.info("streaming %s (limit=%s)", data.dataset_name, limit)
+        return load_dataset(data.dataset_name, split="train", streaming=True)
+
+    logger.info("loading %s", data.dataset_name)
+    return load_dataset(data.dataset_name, split="train")
+
+
 def prepare(
     config: Config,
     *,
@@ -190,10 +217,7 @@ def prepare(
     os.makedirs(data.image_folder, exist_ok=True)
 
     if records is None:
-        from datasets import load_dataset  # imported lazily: heavy dependency
-
-        logger.info("loading %s", data.dataset_name)
-        records = load_dataset(data.dataset_name, split="train")
+        records = load_records(data, limit=limit)
 
     samples_by_image: dict[str, list[dict[str, Any]]] = {}
     images_written = 0

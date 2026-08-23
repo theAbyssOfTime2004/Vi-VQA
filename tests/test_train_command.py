@@ -5,7 +5,12 @@ import os
 import pytest
 
 from vivqa.config import Config
-from vivqa.train.command import TRAIN_ENTRYPOINT, build_train_command, latest_checkpoint
+from vivqa.train.command import (
+    TRAIN_ENTRYPOINT,
+    build_train_command,
+    latest_checkpoint,
+    resolve_model_source,
+)
 
 
 def value_after(command, flag):
@@ -151,3 +156,42 @@ class TestLatestCheckpoint:
             resume=True,
         )
         assert "--resume_from_checkpoint" not in command
+
+
+class TestResolveModelSource:
+    def test_model_path_is_passed_through_untouched(self):
+        # A HuggingFace id must survive verbatim — this is what makes it
+        # possible to score the un-finetuned base model.
+        assert (
+            resolve_model_source(model_path="Qwen/Qwen3-VL-8B-Instruct")
+            == "Qwen/Qwen3-VL-8B-Instruct"
+        )
+
+    def test_model_path_wins_over_a_checkpoint(self, tmp_path):
+        (tmp_path / "checkpoint-500").mkdir()
+        assert (
+            resolve_model_source(model_path="Qwen/Qwen3-VL-8B-Instruct", output_dir=str(tmp_path))
+            == "Qwen/Qwen3-VL-8B-Instruct"
+        )
+
+    def test_named_checkpoint_is_joined_to_output_dir(self, tmp_path):
+        (tmp_path / "checkpoint-500").mkdir()
+        resolved = resolve_model_source(checkpoint="checkpoint-500", output_dir=str(tmp_path))
+        assert resolved == os.path.join(str(tmp_path), "checkpoint-500")
+
+    def test_missing_named_checkpoint_is_reported(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match="checkpoint not found"):
+            resolve_model_source(checkpoint="checkpoint-999", output_dir=str(tmp_path))
+
+    def test_falls_back_to_the_newest_checkpoint(self, tmp_path):
+        for step in (500, 1500):
+            (tmp_path / f"checkpoint-{step}").mkdir()
+        assert resolve_model_source(output_dir=str(tmp_path)).endswith("checkpoint-1500")
+
+    def test_no_checkpoint_suggests_scoring_the_base_model(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match="Qwen/Qwen3-VL-8B-Instruct"):
+            resolve_model_source(output_dir=str(tmp_path))
+
+    def test_nothing_to_resolve_from_is_rejected(self):
+        with pytest.raises(ValueError, match="pass model_path"):
+            resolve_model_source()

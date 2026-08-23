@@ -15,6 +15,11 @@ data:
   image_folder: "./data/images"
   image_quality: 95
 
+  # Stream instead of downloading the whole split up front. Combine with
+  # `vivqa prepare --limit N` to fetch only the first N records — matters on
+  # Colab/Kaggle where disk is tight.
+  streaming: false
+
   # Fractions must sum to 1.0. Splitting happens at the *image* level so
   # QA pairs from one image never straddle the train/val boundary.
   splits:

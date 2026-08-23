@@ -6,6 +6,7 @@ from vivqa.train.command import (
     build_train_command,
     format_command,
     latest_checkpoint,
+    resolve_model_source,
 )
 from vivqa.train.runner import ensure_trainer_repo, run_training
 
@@ -16,5 +17,6 @@ __all__ = [
     "ensure_trainer_repo",
     "format_command",
     "latest_checkpoint",
+    "resolve_model_source",
     "run_training",
 ]

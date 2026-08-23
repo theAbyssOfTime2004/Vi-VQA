@@ -99,12 +99,23 @@ def _login() -> None:
     timeout=3600,
     memory=8192,
 )
-def prepare_dataset(limit: int | None = None, grounding: bool = False):
-    """Download the dataset and write train/val/test splits to the volume."""
+def prepare_dataset(
+    limit: int | None = None,
+    grounding: bool = False,
+    streaming: bool = False,
+):
+    """Download the dataset and write train/val/test splits to the volume.
+
+    `streaming=True` with a `limit` fetches only the records it needs
+    instead of pulling the whole split first.
+    """
     from vivqa.data.prepare import prepare
 
     _login()
-    config = _load([f"data.grounding.enabled={str(grounding).lower()}"])
+    config = _load([
+        f"data.grounding.enabled={str(grounding).lower()}",
+        f"data.streaming={str(streaming).lower()}",
+    ])
 
     counts = prepare(config, limit=limit)
     data_volume.commit()
@@ -167,21 +178,33 @@ def train_model(
 
 @app.function(image=image, gpu="A100", volumes=VOLUMES, timeout=7200, memory=32768)
 def evaluate_model(
+    model_path: str | None = None,
     checkpoint: str | None = None,
     num_samples: int | None = None,
     split: str = "val",
 ):
-    """Score a checkpoint. Defaults to the newest one."""
+    """Score a model on a split.
+
+    Args:
+        model_path: A HuggingFace model id or absolute path. Use this to
+            score the un-finetuned base model — the baseline a fine-tuning
+            result has to be read against.
+        checkpoint: A checkpoint directory name under the output dir.
+        num_samples: How many samples to score; -1 for the whole split.
+        split: Which split to score.
+
+    With neither model_path nor checkpoint, the newest checkpoint is used.
+    """
     from vivqa.evaluation.runner import evaluate, format_scores
     from vivqa.model import VQAModel
-    from vivqa.train.command import latest_checkpoint
+    from vivqa.train.command import resolve_model_source
 
     config = _load()
-    output_dir = config.training.output_dir
-
-    path = os.path.join(output_dir, checkpoint) if checkpoint else latest_checkpoint(output_dir)
-    if not path or not os.path.isdir(path):
-        raise FileNotFoundError(f"no checkpoint found under {output_dir}")
+    path = resolve_model_source(
+        model_path=model_path,
+        checkpoint=checkpoint,
+        output_dir=config.training.output_dir,
+    )
     print(f"📂 evaluating {path}")
 
     model = VQAModel.from_pretrained(path, config)
@@ -231,27 +254,42 @@ def main(
     num_epochs: int = 0,
     num_eval: int = 200,
     grounding: bool = False,
+    streaming: bool = False,
+    limit: int = 0,
+    baseline: bool = False,
 ):
     """Run the pipeline.
 
     Args:
-        step: prepare | train | evaluate | all
+        step: prepare | train | evaluate | baseline | all
         num_epochs: 0 to use the value in config.yaml
         num_eval: samples to score; -1 for the whole split
         grounding: prepare the data with description grounding enabled
+        streaming: stream the dataset instead of downloading the split
+        limit: process at most this many records; 0 for all
+        baseline: score the un-finetuned base model instead of a checkpoint
+
+    Scoring the base model needs no training at all:
+        modal run scripts/train_on_modal.py --step baseline
     """
-    valid = {"prepare", "train", "evaluate", "all"}
+    valid = {"prepare", "train", "evaluate", "baseline", "all"}
     if step not in valid:
         raise SystemExit(f"--step must be one of {sorted(valid)}, got {step!r}")
 
     if step in ("prepare", "all"):
         print("\n📦 preparing dataset")
-        print(prepare_dataset.remote(grounding=grounding))
+        print(prepare_dataset.remote(
+            limit=limit or None, grounding=grounding, streaming=streaming
+        ))
 
     if step in ("train", "all"):
         print("\n🎯 training")
         print(train_model.remote(num_epochs=num_epochs or None))
 
-    if step in ("evaluate", "all"):
+    if step == "baseline" or baseline:
+        print("\n📊 scoring the base model (no fine-tuning)")
+        config_model_id = "Qwen/Qwen3-VL-8B-Instruct"
+        print(evaluate_model.remote(model_path=config_model_id, num_samples=num_eval))
+    elif step in ("evaluate", "all"):
         print("\n📊 evaluating")
         print(evaluate_model.remote(num_samples=num_eval))

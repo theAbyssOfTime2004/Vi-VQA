@@ -25,6 +25,7 @@ __all__ = [
     "TRAIN_ENTRYPOINT",
     "build_train_command",
     "latest_checkpoint",
+    "resolve_model_source",
 ]
 
 REPO_URL = "https://github.com/2U1/Qwen-VL-Series-Finetune.git"
@@ -57,6 +58,49 @@ def latest_checkpoint(output_dir: str) -> str | None:
     if not checkpoints:
         return None
     return os.path.join(output_dir, max(checkpoints)[1])
+
+
+def resolve_model_source(
+    *,
+    model_path: str | None = None,
+    checkpoint: str | None = None,
+    output_dir: str | None = None,
+) -> str:
+    """Decide which model to load for inference or evaluation.
+
+    Priority: an explicit `model_path` wins, then a named checkpoint under
+    `output_dir`, then the newest checkpoint there.
+
+    `model_path` is passed through untouched so a HuggingFace model id
+    works alongside a local directory. That is what makes it possible to
+    score the un-finetuned base model — the baseline every fine-tuning
+    result has to be read against.
+
+    Raises:
+        ValueError: nothing was given to resolve from.
+        FileNotFoundError: the named or newest checkpoint does not exist.
+    """
+    if model_path:
+        return model_path
+
+    if not output_dir:
+        raise ValueError(
+            "pass model_path, or output_dir to resolve a checkpoint from"
+        )
+
+    if checkpoint:
+        path = os.path.join(output_dir, checkpoint)
+        if not os.path.isdir(path):
+            raise FileNotFoundError(f"checkpoint not found: {path}")
+        return path
+
+    latest = latest_checkpoint(output_dir)
+    if not latest:
+        raise FileNotFoundError(
+            f"no checkpoint under {output_dir}. Pass model_path to evaluate a "
+            "base model, e.g. Qwen/Qwen3-VL-8B-Instruct"
+        )
+    return latest
 
 
 def build_train_command(

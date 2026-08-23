@@ -34,11 +34,28 @@ vivqa chat --model-path ./checkpoints/qwen3vl-vivqa/checkpoint-1500
 
 ```bash
 # Ví dụ override
-vivqa prepare --limit 100                          # thử nhanh trên 100 record
-vivqa train --dry-run                              # in lệnh train, không chạy
+vivqa prepare --limit 100 --set data.streaming=true  # chỉ kéo 100 record, không tải cả split
+vivqa train --dry-run                                # in lệnh train, không chạy
 vivqa train --num-gpus 4 --set training.num_train_epochs=3
 vivqa eval --model-path <ckpt> --num-samples -1 --output results.json
 ```
+
+## Baseline zero-shot
+
+`--model-path` nhận thẳng HF model id, nên chấm được model **chưa fine-tune**
+mà không cần train gì:
+
+```bash
+vivqa eval --model-path Qwen/Qwen3-VL-8B-Instruct \
+           --num-samples 200 --output ./results/baseline.json
+```
+
+Hãy chạy cái này **trước** khi bắt đầu một run 8–20 giờ: nếu base model đã trả
+lời đúng nội dung mà chỉ khác văn phong, thì phần lớn mức tăng của fine-tune là
+học phong cách chứ không phải học năng lực.
+
+`notebooks/baseline_a1.ipynb` chạy trọn quy trình đó trên Colab — chấm 200 mẫu
+rồi in 30 mẫu kèm rubric phân loại (văn phong / suy luận / OCR).
 
 Chạy trên Modal:
 
@@ -84,8 +101,12 @@ src/vivqa/
 scripts/
   train_qwen3vl.sh          # wrapper mỏng cho chạy local
   train_on_modal.py         # phần thuộc về Modal, không chứa logic dataset
-tests/                      # 118 test, chạy không cần GPU
-notebooks/eda.ipynb         # phân tích dataset
+tests/                      # 133 test, chạy không cần GPU
+notebooks/
+  eda.ipynb                 # phân tích dataset
+  baseline_a1.ipynb         # chấm base model zero-shot, không train
+  quick_test.ipynb          # smoke test môi trường
+  train_on_colab.ipynb      # training trên Colab
 ```
 
 ## Kiến trúc
@@ -127,7 +148,7 @@ khác nhau, và dataset có cả hai.
 
 ```bash
 pip install -e '.[dev]'
-pytest                       # 118 test, không cần torch/transformers
+pytest                       # 133 test, không cần torch/transformers
 ```
 
 Tầng config, data và metrics cố tình không import torch, nên test chạy trong vài

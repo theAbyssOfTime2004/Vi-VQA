@@ -121,6 +121,14 @@ class DataConfig:
     data_dir: str = "./data"
     image_folder: str = "./data/images"
     image_quality: int = 95
+
+    # Stream records instead of downloading the whole split first. Pair it
+    # with `vivqa prepare --limit N` to pull only the first N records —
+    # the difference between a few hundred MB and several GB on a Colab or
+    # Kaggle disk. Without a limit, streaming still walks the entire split
+    # and only saves the up-front download.
+    streaming: bool = False
+
     splits: SplitConfig = field(default_factory=SplitConfig)
     grounding: GroundingConfig = field(default_factory=GroundingConfig)
 

@@ -5,6 +5,7 @@ from vivqa.data.prepare import (
     assign_splits,
     build_samples,
     extract_qa_pairs,
+    load_records,
     prepare,
     write_split,
 )
@@ -15,6 +16,7 @@ __all__ = [
     "assign_splits",
     "build_samples",
     "extract_qa_pairs",
+    "load_records",
     "prepare",
     "truncate_description",
     "write_split",

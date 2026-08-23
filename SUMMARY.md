@@ -114,20 +114,30 @@ huyền tổ hợp — hiển thị y hệt, so sánh ra khác, và dataset có 
 
 ### Test
 
-118 test, không cần torch/transformers/GPU — các tầng config, data và metric cố
+133 test, không cần torch/transformers/GPU — các tầng config, data và metric cố
 tình không import thư viện nặng, nên `pytest` chạy trong vài giây.
 
 ---
 
 ## Trạng thái
 
-Pipeline sẵn sàng, **model chưa được train**. Bước tiếp theo:
+Pipeline sẵn sàng, **model chưa được train**, và chưa có kết quả đo nào.
+
+Bước tiếp theo nên là **baseline zero-shot**, không phải training:
 
 ```bash
-vivqa prepare
-vivqa train --dry-run     # xem lệnh trước
-vivqa train
+vivqa prepare --limit 400 --set data.streaming=true
+vivqa eval --model-path Qwen/Qwen3-VL-8B-Instruct \
+           --split train --num-samples 200 --output ./results/baseline.json
 ```
+
+Lý do: Qwen3-VL-8B đã mạnh sẵn ở tác vụ này. Nếu base model trả lời đúng nội
+dung mà chỉ khác văn phong so với đáp án Gemini, thì chênh lệch before/after
+chủ yếu là *superficial alignment* — học cách nói, không phải học năng lực — và
+một run 8–20 giờ không mua thêm được gì. Đọc tay 30 mẫu quyết định điều đó rẻ
+hơn nhiều so với train rồi mới biết.
+
+`notebooks/baseline_a1.ipynb` chạy trọn quy trình này.
 
 ### Hướng mở rộng
 
