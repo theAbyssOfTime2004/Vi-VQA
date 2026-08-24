@@ -158,6 +158,16 @@ def build_sample(
         # traversal experiment needs and free-text grounding does not.
         "fvqa_fact_ids": fact_ids,
         "fvqa_visual_concept": question_record.get("visual_concept"),
+        # The *ungrounded* question and its answer, kept alongside the
+        # rendered `conversations` above. Evaluation conditions differ in
+        # what context they put in front of the question, so each one has
+        # to rebuild the prompt at eval time — which is only possible if
+        # the raw question survives preparation. Baking retrieved facts
+        # into this file instead would mean re-running `prepare` to
+        # change max_hops or swap a ranker, and would let the stored
+        # metadata drift out of step with the stored prompt.
+        "fvqa_question": question_text,
+        "fvqa_answer": answer_text,
     }
 
 

@@ -53,6 +53,14 @@ data:
 # otherwise indistinguishable after the fact.
 retrieval:
   enabled: false
+  # Measured: under `--condition oracle-seed-graph`, hops 1/2/3 give
+  # *identical* recall (52.8% @ top-5 on 282 real questions). That is
+  # structural, not a finding about the graph: the oracle seed is taken
+  # from the supporting fact's own endpoint, so that fact is always one
+  # hop away and deeper walks only add lower-ranked noise. Multi-hop is
+  # for vision-seeded retrieval, where the model's guess may be a
+  # *neighbour* of the right entity rather than the right entity — so the
+  # default stays 2 for the pipeline this is actually aimed at.
   max_hops: 2
   max_seed_entities: 5        # graph nodes the seed guesses may resolve to
   # Traversal cap, applied before ranking. Measured on 981 real questions
@@ -60,7 +68,11 @@ retrieval:
   # 61.1% at 300, 62.7% at 5000. 300 costs 1.6 ms/question — free next to
   # one VLM generate call — so it is the default rather than 100.
   max_candidate_facts: 300
-  top_k_facts: 5              # ranked facts that reach the prompt
+  # Ranked facts that reach the prompt. 5 -> 10 raises recall of the
+  # supporting fact from 52.8% to 61.3%, at the cost of a longer prompt
+  # and more chances for the model to latch onto a wrong fact — the
+  # trade-off to re-measure once real generation numbers exist.
+  top_k_facts: 5
   ranking_method: "lexical"   # deterministic, no extra model, easy to beat
 
 model:

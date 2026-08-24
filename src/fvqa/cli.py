@@ -18,6 +18,7 @@ import sys
 from typing import Sequence
 
 from fvqa.config import ConfigError, load_config
+from fvqa.evaluation.conditions import CONDITIONS
 from fvqa.utils import set_seed, setup_logging
 
 logger = logging.getLogger("fvqa")
@@ -65,6 +66,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--base-model",
         help="Base model for a LoRA adapter, overriding the one named in "
         "adapter_config.json (needed when it points at a path that has moved)",
+    )
+    evaluate.add_argument(
+        "--condition",
+        default="stored",
+        choices=list(CONDITIONS),
+        help="Prompt condition to score under. 'stored' replays the prompt in the "
+        "split file (what a fine-tuned checkpoint was trained on); 'no-context' is "
+        "the floor; 'oracle-fact' hands the model the correct supporting fact; "
+        "'oracle-seed-graph' gives it the correct starting entity and makes it find "
+        "the fact by walking the graph (default: stored)",
     )
     evaluate.add_argument("--split", help="Split to score (default: evaluation.split)")
     evaluate.add_argument("--num-samples", type=int, help="-1 for the whole split")
@@ -122,6 +133,7 @@ def _command_eval(args, config) -> int:
         split=args.split,
         num_samples=args.num_samples,
         output_path=args.output,
+        condition=args.condition,
     )
     print(format_scores(result))
     return 0

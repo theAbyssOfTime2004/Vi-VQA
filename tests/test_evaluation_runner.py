@@ -216,3 +216,78 @@ class TestResultProvenance:
         model = FakeModel()
         evaluate(model, config, split="train")
         assert model.seen[0][0]["role"] == "system"
+
+
+class TestRetrievalSummary:
+    """The run-level bound on what grounding could have contributed."""
+
+    def test_counts_how_often_the_supporting_fact_was_retrieved(self):
+        from fvqa.evaluation.runner import summarize_retrieval
+
+        records = [
+            {"retrieval": {"status": "ok", "oracle_fact_retrieved": True}},
+            {"retrieval": {"status": "ok", "oracle_fact_retrieved": False}},
+            {"retrieval": {"status": "ok", "oracle_fact_retrieved": True}},
+        ]
+        summary = summarize_retrieval(records)
+        assert summary["oracle_fact_retrieved"] == 2
+        assert summary["num_with_provenance"] == 3
+        assert summary["recall"] == pytest.approx(2 / 3)
+
+    def test_counts_retrieval_failures_separately(self):
+        # A seed that resolved to nothing is a different failure from a
+        # seed that resolved and simply missed the fact.
+        from fvqa.evaluation.runner import summarize_retrieval
+
+        records = [
+            {"retrieval": {"status": "no_seed_match", "oracle_fact_retrieved": False}},
+            {"retrieval": {"status": "ok", "oracle_fact_retrieved": True}},
+        ]
+        summary = summarize_retrieval(records)
+        assert summary["failed_retrievals"] == 1
+        assert summary["oracle_fact_retrieved"] == 1
+
+    def test_ignores_records_without_provenance(self):
+        from fvqa.evaluation.runner import summarize_retrieval
+
+        summary = summarize_retrieval([{"id": "x"}, {"id": "y"}])
+        assert summary["num_with_provenance"] == 0
+        assert summary["recall"] == 0.0
+
+    def test_format_scores_reports_the_condition(self):
+        from fvqa.evaluation.runner import format_scores
+
+        rendered = format_scores(
+            {
+                "split": "val",
+                "condition": "oracle-seed-graph",
+                "num_samples": 10,
+                "num_failed": 0,
+                "metrics": {"exact_match": 42.0},
+                "retrieval": {"max_hops": 2, "top_k_facts": 5, "ranking_method": "lexical"},
+                "retrieval_summary": {
+                    "num_with_provenance": 10,
+                    "oracle_fact_retrieved": 6,
+                    "recall": 0.6,
+                    "failed_retrievals": 1,
+                },
+            }
+        )
+        assert "oracle-seed-graph" in rendered
+        assert "60.0%" in rendered
+        assert "2 hop(s)" in rendered
+
+    def test_format_scores_omits_retrieval_for_conditions_that_do_not_retrieve(self):
+        from fvqa.evaluation.runner import format_scores
+
+        rendered = format_scores(
+            {
+                "split": "val",
+                "condition": "no-context",
+                "num_samples": 10,
+                "num_failed": 0,
+                "metrics": {"exact_match": 12.0},
+            }
+        )
+        assert "Retrieval:" not in rendered
+        assert "no-context" in rendered

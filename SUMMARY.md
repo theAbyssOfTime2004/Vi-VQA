@@ -211,11 +211,67 @@ bỏ stopword chỉ còn đúng seed, mọi fact của `dog` điểm bằng nhau
 theo fact id — deterministic nhưng vô nghĩa. Đây chính là chỗ embedding
 hoặc LLM reranker sẽ ăn điểm.
 
-### Còn lại
+### M2 — PR5: eval conditions (xong)
 
-**M2**: nối retrieval vào `evaluation/runner.py` thành eval condition
-(`no-context` / `oracle-fact` / `oracle-seed-graph`), retrieval chạy lúc
-eval chứ không bake vào split JSON.
+`fvqa eval --condition {stored | no-context | style | oracle-fact |
+oracle-seed-graph}`. Mỗi condition **chỉ khác nhau đúng một thứ** — phần
+context đặt trước câu hỏi — nên hiệu số điểm giữa chúng đọc được:
+
+```
+oracle-fact − oracle-seed-graph   = mất mát do traversal + ranking
+oracle-seed-graph − vision-seed   = mất mát do vision-seeding  (M3)
+vision-seed − no-context          = giá trị thật của graph retrieval
+```
+
+Retrieval chạy **lúc eval**, không bake vào split JSON — đúng như đề xuất.
+Split giữ `fvqa_question`/`fvqa_answer` gốc, condition tự dựng prompt. Nhờ
+vậy đổi `max_hops` hay đổi ranker không phải `prepare` lại, và metadata
+không lệch khỏi prompt thật sự đã chấm.
+
+Mọi condition có fact đều đi qua chung `apply_grounding` → hai condition
+chỉ khác **fact đến từ đâu**, không khác hình dạng prompt.
+
+Provenance ghi từng sample (seed nào, resolve ra entity nào, fact nào vào
+prompt, supporting fact có sống sót không) + tổng hợp mức run. Recall này
+là **cận trên của phần grounding có thể đóng góp** — model không thể dùng
+fact mà retrieval chưa bao giờ đưa cho nó.
+
+**Bug bắt được khi tự chạy thử, không phải từ test:**
+
+1. `apply_grounding` trả về câu hỏi trần khi `grounding.enabled=false` (mặc
+   định). Nghĩa là `--condition oracle-fact` sẽ **âm thầm không đưa fact
+   nào** rồi báo điểm như thể đã đưa. Sửa: condition tự bật grounding —
+   `data.grounding.enabled` quyết định `prepare` có bake fact vào split
+   không, còn chọn condition là quyết định riêng, đã nằm ở tên condition.
+2. `oracle-fact` báo "supporting fact retrieved: 0/11" vì provenance thiếu
+   key — đọc thành "retrieval fail 100%" trong khi condition này theo định
+   nghĩa luôn đưa đúng fact. Sửa thành `True` khi fact resolve được.
+3. `oracle-fact` in ra "Retrieval: 2 hop(s), top-5, lexical" — mô tả việc
+   chưa hề xảy ra. Tách `needs_graph` (cần load facts) khỏi `traverses`
+   (thật sự đi graph).
+4. `--condition style` với `inference.system_prompt` rỗng giống hệt
+   `no-context` → giờ log warning thay vì im lặng.
+
+`vision-seed-graph` raise `NotImplementedError` với thông báo rõ, không
+lặng lẽ tụt về condition khác rồi báo số cho thí nghiệm chưa từng chạy.
+
+**Đo thật, 282 câu val:**
+
+| hops | top-5 | top-10 |
+|---|---|---|
+| 1 | 52,8% | 61,3% |
+| 2 | 52,8% | 61,3% |
+| 3 | 52,8% | 61,3% |
+
+`max_hops` **không ảnh hưởng gì cả** — và đây là chuyện cấu trúc, không
+phải kết luận về graph: oracle seed lấy từ chính endpoint của supporting
+fact, nên fact đó luôn cách 1 hop; đi sâu hơn chỉ thêm nhiễu xếp hạng thấp
+hơn. Multi-hop chỉ có ý nghĩa cho **vision-seeding** (M3), khi model đoán
+ra một entity *hàng xóm* của entity đúng chứ không phải entity đúng. Default
+vẫn để 2 vì đó mới là pipeline thật sự nhắm tới — nhưng ghi rõ ở đây để
+sau này không ai đọc nhầm "tăng hop vô dụng" thành kết luận về dataset.
+
+### Còn lại
 
 **M3**: `SeedProvider` interface, Qwen3-VL vision-seeding có cache, fallback
 khi `find_entities` không match, nối `vision-seed-graph`.

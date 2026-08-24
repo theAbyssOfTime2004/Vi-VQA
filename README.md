@@ -169,6 +169,39 @@ pytest                       # không cần torch/transformers
 Tầng config, data và metrics cố tình không import torch, nên test chạy
 trong vài giây trên máy không GPU.
 
+## Các điều kiện đánh giá
+
+```bash
+fvqa eval --model-path Qwen/Qwen3-VL-8B-Instruct --condition no-context
+fvqa eval --model-path Qwen/Qwen3-VL-8B-Instruct --condition style
+fvqa eval --model-path Qwen/Qwen3-VL-8B-Instruct --condition oracle-fact
+fvqa eval --model-path Qwen/Qwen3-VL-8B-Instruct --condition oracle-seed-graph
+```
+
+| Condition | Model nhận được |
+|---|---|
+| `no-context` | ảnh + câu hỏi. Sàn để so mọi thứ khác |
+| `style` | thêm system prompt chỉ nói *cách* trả lời, không nói nội dung |
+| `oracle-fact` | thêm đúng supporting fact — cận trên của grounding |
+| `oracle-seed-graph` | thêm entity xuất phát đúng, **không** cho fact ID: phải tự BFS + rank để tìm |
+| `vision-seed-graph` | model tự nhìn ảnh đoán entity (chưa làm — M3) |
+| `stored` | phát lại đúng prompt trong split file (mặc định; dùng cho checkpoint đã fine-tune) |
+
+Mỗi condition chỉ khác nhau đúng phần context, nên hiệu số điểm chỉ ra lỗi
+nằm ở đâu:
+
+```
+oracle-fact − oracle-seed-graph   mất mát do traversal + ranking
+oracle-seed-graph − vision-seed   mất mát do vision-seeding
+vision-seed − no-context          giá trị thật của graph retrieval
+```
+
+Retrieval chạy lúc eval, không bake vào split JSON — đổi `max_hops` hay
+ranker không cần `prepare` lại. Result JSON ghi đủ provenance: seed nào,
+resolve ra entity nào, fact nào vào prompt, supporting fact có sống sót
+không. Recall đó là cận trên của phần grounding có thể đóng góp — model
+không dùng được fact mà retrieval chưa từng đưa cho nó.
+
 ## Yêu cầu phần cứng
 
 | GPU | `model.tuning_method` | Thời gian (2 epoch) |

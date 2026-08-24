@@ -9,9 +9,16 @@ from typing import Any, Mapping, Sequence
 
 from fvqa.config import Config
 from fvqa.data.samples import IMAGE_TOKEN
+from fvqa.evaluation.conditions import CONDITIONS, ConditionContext, build_prompt
 from fvqa.evaluation.metrics import compute_metrics
 
-__all__ = ["evaluate", "load_split", "messages_from_sample", "reference_of"]
+__all__ = [
+    "CONDITIONS",
+    "evaluate",
+    "load_split",
+    "messages_from_sample",
+    "reference_of",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +91,7 @@ def evaluate(
     split: str | None = None,
     num_samples: int | None = None,
     output_path: str | None = None,
+    condition: str = "stored",
 ) -> dict[str, Any]:
     """Generate predictions for a split and score them.
 
@@ -94,6 +102,10 @@ def evaluate(
         num_samples: How many samples to score; -1 for all. Defaults to
             `evaluation.num_samples`.
         output_path: Where to write the full results JSON.
+        condition: Which prompt condition to score under — see
+            `fvqa.evaluation.conditions.CONDITIONS`. The default replays
+            the prompt stored in the split file, which is what a
+            fine-tuned checkpoint was trained on.
 
     Returns:
         A dict with the metric scores and every prediction.
@@ -102,11 +114,16 @@ def evaluate(
     split = split or settings.split
     num_samples = settings.num_samples if num_samples is None else num_samples
 
+    condition_context = ConditionContext(config=config, condition=condition)
+
     samples = load_split(config.data.split_file(split))
     if num_samples > 0:
         samples = samples[:num_samples]
 
-    logger.info("evaluating %d samples from the %s split", len(samples), split)
+    logger.info(
+        "evaluating %d samples from the %s split (condition: %s)",
+        len(samples), split, condition,
+    )
 
     predictions: list[str] = []
     references: list[str] = []
@@ -116,12 +133,10 @@ def evaluate(
     for index, sample in enumerate(samples):
         reference = reference_of(sample)
         try:
-            messages = messages_from_sample(
-                sample,
-                config.data.image_folder,
-                system_prompt=config.inference.system_prompt,
+            prompt = build_prompt(sample, condition_context)
+            prediction = model.generate(
+                prompt.messages, temperature=settings.temperature
             )
-            prediction = model.generate(messages, temperature=settings.temperature)
         except Exception as error:  # noqa: BLE001 - one bad sample must not end the run
             logger.warning("sample %s failed: %s", sample.get("id", index), error)
             failures += 1
@@ -129,15 +144,20 @@ def evaluate(
 
         predictions.append(prediction)
         references.append(reference)
-        records.append(
-            {
-                "id": sample.get("id"),
-                "image": sample.get("image"),
-                "question": messages[-1]["content"][-1]["text"],
-                "reference": reference,
-                "prediction": prediction,
-            }
-        )
+        record = {
+            "id": sample.get("id"),
+            "image": sample.get("image"),
+            "question": prompt.question,
+            "reference": reference,
+            "prediction": prediction,
+        }
+        if prompt.retrieval is not None:
+            # Per-sample provenance: which seeds were tried, what resolved,
+            # which facts reached the prompt. Without it a low score cannot
+            # be split between "retrieval missed the fact" and "the model
+            # had the fact and still got it wrong".
+            record["retrieval"] = prompt.retrieval
+        records.append(record)
 
         if (index + 1) % 25 == 0:
             logger.info("scored %d/%d", index + 1, len(samples))
@@ -146,6 +166,7 @@ def evaluate(
 
     result = {
         "split": split,
+        "condition": condition,
         "num_samples": len(predictions),
         "num_failed": failures,
         "grounding_enabled": config.data.grounding.enabled,
@@ -156,6 +177,11 @@ def evaluate(
         "metrics": scores,
         "predictions": records,
     }
+
+    if condition_context.traverses:
+        result["retrieval"] = config.retrieval.as_dict()
+    if condition_context.needs_graph:
+        result["retrieval_summary"] = summarize_retrieval(records)
 
     if output_path:
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
@@ -172,12 +198,52 @@ def format_scores(result: Mapping[str, Any]) -> str:
         "=" * 60,
         f"Evaluation — split={result['split']} n={result['num_samples']}"
         + (f" (failed: {result['num_failed']})" if result.get("num_failed") else ""),
-        f"Knowledge grounding: {'on' if result.get('grounding_enabled') else 'off'}",
-        "=" * 60,
+        f"Condition: {result.get('condition', 'stored')}",
     ]
+
+    summary = result.get("retrieval_summary")
+    if summary:
+        settings = result.get("retrieval")
+        if settings:
+            lines.append(
+                f"Retrieval: {settings.get('max_hops')} hop(s), "
+                f"top-{settings.get('top_k_facts')}, {settings.get('ranking_method')}"
+            )
+        # The upper bound on what grounding could have contributed: the
+        # model cannot use a fact retrieval never handed it.
+        lines.append(
+            f"  supporting fact retrieved: {summary['oracle_fact_retrieved']}"
+            f"/{summary['num_with_provenance']}"
+            f" ({summary['recall']:.1%})"
+        )
+        if summary["failed_retrievals"]:
+            lines.append(f"  retrieval failures: {summary['failed_retrievals']}")
+
+    lines.append("=" * 60)
     for name, value in result["metrics"].items():
         # CIDEr lives on 0-10; the rest are percentages.
         suffix = "" if name == "cider" else "%"
         lines.append(f"  {name:<12} {value:8.2f}{suffix}")
     lines.append("=" * 60)
     return "\n".join(lines)
+
+
+def summarize_retrieval(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Aggregate per-sample retrieval provenance into run-level numbers.
+
+    `recall` is the share of scored questions whose own supporting fact
+    survived retrieval into the prompt. It bounds what grounding could
+    possibly have contributed — a fact the model was never handed cannot
+    have helped it — so reading a metric without it invites crediting the
+    graph for answers it played no part in.
+    """
+    with_provenance = [r["retrieval"] for r in records if r.get("retrieval")]
+    retrieved = sum(1 for r in with_provenance if r.get("oracle_fact_retrieved"))
+    failures = sum(1 for r in with_provenance if r.get("status") not in ("ok", None))
+
+    return {
+        "num_with_provenance": len(with_provenance),
+        "oracle_fact_retrieved": retrieved,
+        "recall": retrieved / len(with_provenance) if with_provenance else 0.0,
+        "failed_retrievals": failures,
+    }
