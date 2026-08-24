@@ -28,6 +28,27 @@ def test_defaults_apply_to_missing_sections(tmp_path):
     assert config.model.lora.rank == 128
 
 
+@pytest.mark.parametrize(
+    "method, uses_lora, uses_quantization",
+    [("full", False, False), ("lora", True, False), ("qlora", True, True)],
+)
+def test_tuning_method_decides_what_is_used(method, uses_lora, uses_quantization):
+    # QLoRA implies LoRA — the enum exists so that "quantized but with no
+    # adapters attached" cannot be expressed at all.
+    config = Config()
+    config.model.tuning_method = method
+    assert config.model.uses_lora is uses_lora
+    assert config.model.uses_quantization is uses_quantization
+
+
+def test_max_steps_defaults_to_the_full_schedule(tmp_path):
+    # null, not the trainer's -1 sentinel: absent means the flag is never
+    # emitted at all.
+    assert Config().training.max_steps is None
+    config = load_config(write_config(tmp_path, {"training": {"max_steps": None}}))
+    assert config.training.max_steps is None
+
+
 def test_trainer_revision_defaults_to_a_real_pinned_commit():
     # A run's reproducibility depends on this never silently tracking
     # HEAD — the default must be an actual commit SHA, not a branch name.
@@ -63,7 +84,10 @@ def test_missing_file_is_reported(tmp_path):
             {"training": {"freeze_llm": True, "freeze_vision_tower": True, "freeze_merger": True}},
             "nothing would train",
         ),
-        ({"model": {"lora": {"enabled": True}, "qlora": {"enabled": True}}}, "not both"),
+        ({"model": {"tuning_method": "adapter"}}, "tuning_method"),
+        ({"model": {"quantization": {"quant_type": "int8"}}}, "quant_type"),
+        ({"model": {"lora": {"rank": 0}}}, "rank must be positive"),
+        ({"training": {"max_steps": 0}}, "max_steps must be positive"),
         ({"trainer": {"revision": ""}}, "revision must not be empty"),
         ({"trainer": {"repo_url": ""}}, "repo_url must not be empty"),
     ],

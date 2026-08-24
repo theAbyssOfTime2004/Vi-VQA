@@ -171,7 +171,11 @@ def build_train_command(
     else:
         command += ["--eval_strategy", "no"]
 
-    if model.lora.enabled:
+    # QLoRA is adapters on a 4-bit base, so it sets *both* --lora_enable
+    # and --bits. Emitting `--lora_enable False --bits 4` — which is what
+    # the old lora/qlora boolean pair produced — quantizes the base and
+    # attaches nothing trainable to it.
+    if model.uses_lora:
         lora = model.lora
         command += [
             "--lora_enable", "True",
@@ -186,9 +190,15 @@ def build_train_command(
     else:
         command += ["--lora_enable", "False"]
 
-    if model.qlora.enabled:
-        # 4-bit base weights with adapters on top.
-        command += ["--bits", "4"]
+    if model.uses_quantization:
+        quantization = model.quantization
+        command += [
+            "--bits", "4",
+            # The trainer's own names for these; it builds the
+            # BitsAndBytesConfig itself and takes no bnb_4bit_* flags.
+            "--quant_type", quantization.quant_type,
+            "--double_quant", _flag(quantization.double_quant),
+        ]
 
     command += [
         "--freeze_vision_tower", _flag(training.freeze_vision_tower),
@@ -230,6 +240,11 @@ def build_train_command(
         # The trainer takes the negated form of the config flag.
         "--disable_flash_attn2", _flag(not model.use_flash_attn),
     ]
+
+    # Only when set: the trainer's default of -1 means "use the epoch
+    # schedule", and passing that explicitly would be a no-op at best.
+    if training.max_steps is not None:
+        command += ["--max_steps", str(training.max_steps)]
 
     if resume:
         checkpoint = latest_checkpoint(output_dir)

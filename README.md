@@ -171,11 +171,19 @@ trong vài giây trên máy không GPU.
 
 ## Yêu cầu phần cứng
 
-| GPU | Cấu hình | Thời gian (2 epoch) |
-|-----|----------|---------------------|
-| RTX 3080 (10GB) | QLoRA 4-bit | vài giờ |
-| RTX 3090 (24GB) | LoRA | vài giờ |
-| A100 (40GB) | LoRA | 1-2 giờ |
+| GPU | `model.tuning_method` | Thời gian (2 epoch) |
+|-----|----------------------|---------------------|
+| RTX 3080 (10GB) | `qlora` (4-bit) | vài giờ |
+| RTX 3090 (24GB) | `lora` | vài giờ |
+| A100 (40GB) | `lora` | 1-2 giờ |
+
+Trước khi chạy thật, nên chạy smoke test — 2 optimizer step rồi reload lại
+adapter vừa lưu, đủ để biết model load được, ảnh decode được, forward và
+backward chạy, checkpoint ghi được và `fvqa eval` đọc lại được:
+
+```bash
+bash scripts/smoke_gpu.sh
+```
 
 FVQA nhỏ hơn nhiều VQA dataset khác (2.190 ảnh, 5.826 câu hỏi) — train
 nhanh hơn hẳn so với dataset cỡ chục nghìn ảnh. Hết VRAM thì giảm

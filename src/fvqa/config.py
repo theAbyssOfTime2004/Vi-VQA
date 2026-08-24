@@ -31,7 +31,7 @@ __all__ = [
     "InferenceConfig",
     "LoraConfig",
     "ModelConfig",
-    "QLoraConfig",
+    "QuantizationConfig",
     "SplitConfig",
     "TrainerConfig",
     "TrainingConfig",
@@ -149,7 +149,8 @@ class DataConfig:
 
 @dataclass
 class LoraConfig:
-    enabled: bool = True
+    """Adapter shape. Read only when `tuning_method` is lora or qlora."""
+
     rank: int = 128
     alpha: int = 256
     dropout: float = 0.05
@@ -160,37 +161,66 @@ class LoraConfig:
     vision_lora: bool = False
 
     def validate(self, path: str) -> None:
-        if self.enabled and self.rank < 1:
+        if self.rank < 1:
             raise ConfigError(f"{path}.rank must be positive, got {self.rank}")
         if not 0.0 <= self.dropout < 1.0:
             raise ConfigError(f"{path}.dropout must be in [0, 1), got {self.dropout}")
 
 
 @dataclass
-class QLoraConfig:
-    enabled: bool = False
-    bnb_4bit_compute_dtype: str = "bfloat16"
-    bnb_4bit_quant_type: str = "nf4"
-    bnb_4bit_use_double_quant: bool = True
+class QuantizationConfig:
+    """4-bit base weights. Read only when `tuning_method` is qlora.
+
+    These are the two knobs the trainer actually exposes (`--quant_type`,
+    `--double_quant`). The compute dtype is deliberately absent: the
+    trainer derives it from `training.bf16`/`training.fp16` and offers no
+    flag for it, so a field here could only ever be decorative.
+    """
+
+    quant_type: str = "nf4"
+    double_quant: bool = True
 
     def validate(self, path: str) -> None:
         valid = ("nf4", "fp4")
-        if self.bnb_4bit_quant_type not in valid:
+        if self.quant_type not in valid:
             raise ConfigError(
-                f"{path}.bnb_4bit_quant_type must be one of {valid}, "
-                f"got {self.bnb_4bit_quant_type!r}"
+                f"{path}.quant_type must be one of {valid}, got {self.quant_type!r}"
             )
 
 
 @dataclass
 class ModelConfig:
+    """The model, and how it is to be tuned.
+
+    `tuning_method` is a single enum rather than a pair of `lora.enabled`
+    / `qlora.enabled` booleans on purpose. Two booleans describe four
+    states, only three of which mean anything, and the fourth
+    (`lora=false, qlora=true`) is not merely redundant — it is what QLoRA
+    was previously configured as, and it silently produced a run that
+    trained nothing: 4-bit frozen base weights with no adapters attached.
+    QLoRA *is* LoRA adapters on a quantized base; with an enum the
+    contradictory state cannot be written down.
+    """
+
     model_id: str = "Qwen/Qwen3-VL-8B-Instruct"
     torch_dtype: str = "bfloat16"
     use_flash_attn: bool = True
     image_min_pixels: int = 256 * 32 * 32
     image_max_pixels: int = 1280 * 32 * 32
+    tuning_method: str = "lora"
     lora: LoraConfig = field(default_factory=LoraConfig)
-    qlora: QLoraConfig = field(default_factory=QLoraConfig)
+    quantization: QuantizationConfig = field(default_factory=QuantizationConfig)
+
+    VALID_TUNING_METHODS = ("full", "lora", "qlora")
+
+    @property
+    def uses_lora(self) -> bool:
+        """QLoRA trains adapters too — that is the whole point of it."""
+        return self.tuning_method in ("lora", "qlora")
+
+    @property
+    def uses_quantization(self) -> bool:
+        return self.tuning_method == "qlora"
 
     def validate(self, path: str) -> None:
         valid_dtypes = ("bfloat16", "float16", "float32", "auto")
@@ -203,14 +233,13 @@ class ModelConfig:
                 f"{path}.image_min_pixels ({self.image_min_pixels}) must be smaller "
                 f"than image_max_pixels ({self.image_max_pixels})"
             )
-        if self.lora.enabled and self.qlora.enabled:
-            # QLoRA already implies LoRA adapters on a quantized base; the
-            # finetune repo takes one flag or the other, never both.
+        if self.tuning_method not in self.VALID_TUNING_METHODS:
             raise ConfigError(
-                f"{path}: enable either lora or qlora, not both"
+                f"{path}.tuning_method must be one of {self.VALID_TUNING_METHODS}, "
+                f"got {self.tuning_method!r}"
             )
         self.lora.validate(f"{path}.lora")
-        self.qlora.validate(f"{path}.qlora")
+        self.quantization.validate(f"{path}.quantization")
 
 
 @dataclass
@@ -238,6 +267,12 @@ class TrainerConfig:
 class TrainingConfig:
     output_dir: str = "./checkpoints/qwen3vl-fvqa"
     num_train_epochs: int = 2
+    # Stop after this many optimizer steps regardless of epochs. None
+    # runs the full schedule; a small value is what makes a GPU smoke
+    # test possible — one that proves the model loads, a batch reaches
+    # the forward pass, gradients flow and a checkpoint is written,
+    # without paying for a real run to find out.
+    max_steps: int | None = None
     per_device_train_batch_size: int = 1
     per_device_eval_batch_size: int = 1
     gradient_accumulation_steps: int = 16
@@ -281,6 +316,10 @@ class TrainingConfig:
         if self.num_train_epochs <= 0:
             raise ConfigError(
                 f"{path}.num_train_epochs must be positive, got {self.num_train_epochs}"
+            )
+        if self.max_steps is not None and self.max_steps < 1:
+            raise ConfigError(
+                f"{path}.max_steps must be positive when set, got {self.max_steps}"
             )
         for name in ("per_device_train_batch_size", "gradient_accumulation_steps"):
             if getattr(self, name) < 1:

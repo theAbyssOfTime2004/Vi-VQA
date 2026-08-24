@@ -52,8 +52,14 @@ model:
   image_min_pixels: 262144    # 256 * 32 * 32
   image_max_pixels: 1310720   # 1280 * 32 * 32
 
+  # full | lora | qlora. One enum rather than lora.enabled + qlora.enabled,
+  # because two booleans allow a fourth state that means nothing: QLoRA
+  # *is* LoRA adapters on a 4-bit base, and "qlora without lora" used to
+  # quantize the base and attach nothing trainable to it.
+  tuning_method: "lora"
+
+  # Read when tuning_method is lora or qlora.
   lora:
-    enabled: true
     rank: 128
     alpha: 256
     dropout: 0.05
@@ -61,11 +67,12 @@ model:
     namespan_exclude: ["lm_head", "embed_tokens"]
     vision_lora: false
 
-  qlora:
-    enabled: false
-    bnb_4bit_compute_dtype: "bfloat16"
-    bnb_4bit_quant_type: "nf4"
-    bnb_4bit_use_double_quant: true
+  # Read only when tuning_method is qlora. The compute dtype is absent on
+  # purpose: the trainer derives it from training.bf16/fp16 and exposes no
+  # flag for it, so a setting here could not be forwarded anywhere.
+  quantization:
+    quant_type: "nf4"                             # nf4 | fp4
+    double_quant: true
 
 # The external trainer (2U1/Qwen-VL-Series-Finetune) moves independently
 # of this project. Pinning a revision here is what makes "config + code"
@@ -79,6 +86,9 @@ trainer:
 training:
   output_dir: "./checkpoints/qwen3vl-fvqa"
   num_train_epochs: 2
+  # null runs the full epoch schedule. Set to a small number for a GPU
+  # smoke run — see scripts/smoke_gpu.sh.
+  max_steps: null
   per_device_train_batch_size: 1
   per_device_eval_batch_size: 1
   gradient_accumulation_steps: 16               # effective batch = 1 * 16

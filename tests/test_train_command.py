@@ -82,21 +82,68 @@ class TestConfigIsHonoured:
 
     def test_lora_disabled_omits_lora_hyperparameters(self):
         config = Config()
-        config.model.lora.enabled = False
+        config.model.tuning_method = "full"
         command = build_train_command(
             config, train_path="/t.json", image_folder="/i", output_dir="/o"
         )
         assert value_after(command, "--lora_enable") == "False"
         assert "--lora_rank" not in command
+        assert "--bits" not in command
 
-    def test_qlora_requests_four_bit_weights(self):
+    def test_qlora_enables_adapters_as_well_as_four_bit_weights(self):
+        # The bug this replaced: `lora.enabled=False, qlora.enabled=True`
+        # produced `--lora_enable False --bits 4`, which quantizes the
+        # base model and attaches nothing trainable to it. QLoRA is LoRA
+        # on a quantized base, so both flags have to be set.
         config = Config()
-        config.model.lora.enabled = False
-        config.model.qlora.enabled = True
+        config.model.tuning_method = "qlora"
         command = build_train_command(
             config, train_path="/t.json", image_folder="/i", output_dir="/o"
         )
+        assert value_after(command, "--lora_enable") == "True"
         assert value_after(command, "--bits") == "4"
+        assert value_after(command, "--lora_rank") == str(config.model.lora.rank)
+
+    def test_qlora_forwards_the_quantization_settings(self):
+        config = Config()
+        config.model.tuning_method = "qlora"
+        config.model.quantization.quant_type = "fp4"
+        config.model.quantization.double_quant = False
+        command = build_train_command(
+            config, train_path="/t.json", image_folder="/i", output_dir="/o"
+        )
+        # The trainer's own flag names — it builds the BitsAndBytesConfig
+        # itself and takes no bnb_4bit_* arguments.
+        assert value_after(command, "--quant_type") == "fp4"
+        assert value_after(command, "--double_quant") == "False"
+
+    def test_plain_lora_does_not_quantize(self):
+        config = Config()
+        config.model.tuning_method = "lora"
+        command = build_train_command(
+            config, train_path="/t.json", image_folder="/i", output_dir="/o"
+        )
+        assert value_after(command, "--lora_enable") == "True"
+        assert "--bits" not in command
+        assert "--quant_type" not in command
+
+
+class TestMaxSteps:
+    def test_absent_by_default(self):
+        # The trainer's own default (-1) already means "use the epoch
+        # schedule"; passing it explicitly would say nothing.
+        command = build_train_command(
+            Config(), train_path="/t.json", image_folder="/i", output_dir="/o"
+        )
+        assert "--max_steps" not in command
+
+    def test_forwarded_when_set(self):
+        config = Config()
+        config.training.max_steps = 2
+        command = build_train_command(
+            config, train_path="/t.json", image_folder="/i", output_dir="/o"
+        )
+        assert value_after(command, "--max_steps") == "2"
 
 
 class TestEvaluationWiring:

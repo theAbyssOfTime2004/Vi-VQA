@@ -175,7 +175,9 @@ def train_model(
     print(f"model:  {config.model.model_id}")
     print(f"epochs: {config.training.num_train_epochs}")
     print(f"batch:  {config.training.effective_batch_size} effective")
-    print(f"LoRA:   rank={config.model.lora.rank} alpha={config.model.lora.alpha}")
+    print(f"tuning: {config.model.tuning_method}")
+    if config.model.uses_lora:
+        print(f"LoRA:   rank={config.model.lora.rank} alpha={config.model.lora.alpha}")
 
     exit_code = run_training(
         config,

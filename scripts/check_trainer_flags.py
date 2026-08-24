@@ -50,6 +50,7 @@ _KNOWN_HF_TRAINING_ARGS = {
     "fp16",
     "tf32",
     "num_train_epochs",
+    "max_steps",
     "per_device_train_batch_size",
     "per_device_eval_batch_size",
     "gradient_accumulation_steps",
@@ -100,13 +101,14 @@ def _emitted_flags() -> set[str]:
 
     flags: set[str] = set()
 
-    for lora, qlora in ((True, False), (False, True), (False, False)):
+    for tuning_method in ("full", "lora", "qlora"):
         for val_path in ("/data/val.json", None):
             for deepspeed in ("scripts/zero2.json", None):
                 config = Config()
-                config.model.lora.enabled = lora
-                config.model.qlora.enabled = qlora
+                config.model.tuning_method = tuning_method
                 config.training.deepspeed = deepspeed
+                # max_steps is emitted only when set, so exercise it too.
+                config.training.max_steps = 2 if deepspeed else None
                 command = build_train_command(
                     config,
                     train_path="/data/train.json",
