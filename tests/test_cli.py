@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from vivqa.cli import main
+from fvqa.cli import main
 
 
 class TestConfigCommand:

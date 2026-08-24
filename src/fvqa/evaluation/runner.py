@@ -7,9 +7,9 @@ import logging
 import os
 from typing import Any, Mapping, Sequence
 
-from vivqa.config import Config
-from vivqa.data.prepare import IMAGE_TOKEN
-from vivqa.evaluation.metrics import compute_metrics
+from fvqa.config import Config
+from fvqa.data.samples import IMAGE_TOKEN
+from fvqa.evaluation.metrics import compute_metrics
 
 __all__ = ["evaluate", "load_split", "messages_from_sample", "reference_of"]
 
@@ -20,7 +20,7 @@ def load_split(path: str) -> list[dict[str, Any]]:
     """Read a prepared split file."""
     if not os.path.exists(path):
         raise FileNotFoundError(
-            f"split file not found: {path}. Run `vivqa prepare` first."
+            f"split file not found: {path}. Run `fvqa prepare` first."
         )
     with open(path, "r", encoding="utf-8") as handle:
         return json.load(handle)

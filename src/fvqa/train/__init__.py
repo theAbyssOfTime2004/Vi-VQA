@@ -1,6 +1,6 @@
 """Training-command construction and launching."""
 
-from vivqa.train.command import (
+from fvqa.train.command import (
     REPO_URL,
     TRAIN_ENTRYPOINT,
     build_train_command,
@@ -8,7 +8,7 @@ from vivqa.train.command import (
     latest_checkpoint,
     resolve_model_source,
 )
-from vivqa.train.runner import ensure_trainer_repo, run_training
+from fvqa.train.runner import ensure_trainer_repo, run_training
 
 __all__ = [
     "REPO_URL",

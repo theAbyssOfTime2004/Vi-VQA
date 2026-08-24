@@ -18,8 +18,8 @@ import os
 
 import pytest
 
-from vivqa.config import Config
-from vivqa.data.fvqa import (
+from fvqa.config import Config
+from fvqa.data.fvqa import (
     build_sample,
     image_path,
     load_facts,
@@ -152,34 +152,34 @@ class TestBuildSample:
     def config(self):
         return Config()
 
-    def test_produces_the_shared_vivqa_sample_shape(self, config):
+    def test_produces_the_shared_fvqa_sample_shape(self, config):
         config.data.grounding.enabled = False
-        sample = build_sample("270", QUESTIONS["270"], FACTS, config.data.fvqa, config.data.grounding)
+        sample = build_sample("270", QUESTIONS["270"], FACTS, config.data.grounding)
         assert sample["id"] == "fvqa_270"
         assert sample["image"] == "ILSVRC2012_test_00050748.JPEG"
         assert sample["conversations"][0]["value"] == "<image>\nWhich object can be found in a jazz club"
         assert sample["conversations"][1] == {"from": "gpt", "value": "trumpet"}
 
     def test_carries_the_oracle_fact_id_and_visual_concept(self, config):
-        sample = build_sample("270", QUESTIONS["270"], FACTS, config.data.fvqa, config.data.grounding)
+        sample = build_sample("270", QUESTIONS["270"], FACTS, config.data.grounding)
         assert sample["fvqa_fact_ids"] == ["conceptnet/e/1"]
         assert sample["fvqa_visual_concept"] == "obj"
 
     def test_grounding_injects_the_oracle_facts_surface_text(self, config):
         config.data.grounding.enabled = True
-        sample = build_sample("270", QUESTIONS["270"], FACTS, config.data.fvqa, config.data.grounding)
+        sample = build_sample("270", QUESTIONS["270"], FACTS, config.data.grounding)
         assert "a trumpet" in sample["conversations"][0]["value"]
         assert "jazz club" in sample["conversations"][0]["value"]
 
     def test_grounding_off_leaves_the_question_bare(self, config):
         config.data.grounding.enabled = False
-        sample = build_sample("270", QUESTIONS["270"], FACTS, config.data.fvqa, config.data.grounding)
+        sample = build_sample("270", QUESTIONS["270"], FACTS, config.data.grounding)
         assert "trumpet" not in sample["conversations"][0]["value"]
 
     def test_falls_back_to_the_questions_own_fact_surface_if_the_id_is_dangling(self, config):
         config.data.grounding.enabled = True
         question = dict(QUESTIONS["270"], fact=["missing/id"])
-        sample = build_sample("270", question, FACTS, config.data.fvqa, config.data.grounding)
+        sample = build_sample("270", question, FACTS, config.data.grounding)
         assert "jazz club" in sample["conversations"][0]["value"]
 
 
@@ -187,8 +187,7 @@ class TestPrepareFvqa:
     @pytest.fixture
     def config(self, fvqa_root):
         config = Config()
-        config.data.source = "fvqa"
-        config.data.fvqa.root = fvqa_root
+        config.data.root = fvqa_root
         config.data.data_dir = fvqa_root  # write outputs alongside the fixture
         return config
 
@@ -247,8 +246,7 @@ class TestPrepareFvqa:
             folds={0: {"train": [f"train_{i}.jpg" for i in range(4)], "test": ["test_0.jpg"]}},
         )
         config = Config()
-        config.data.source = "fvqa"
-        config.data.fvqa.root = fvqa_root
+        config.data.root = fvqa_root
         config.data.data_dir = fvqa_root
 
         counts = prepare_fvqa(config)

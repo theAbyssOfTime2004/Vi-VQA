@@ -1,205 +1,116 @@
-# Vi-VQA — quyết định thiết kế và nhật ký thay đổi
+# FVQA — quyết định thiết kế và nhật ký thay đổi
 
 Tài liệu hướng dẫn sử dụng nằm ở [README.md](README.md). File này ghi lại *vì
 sao* project trông như hiện tại.
 
 ---
 
-## Bài toán
+## Xuất phát điểm: Vi-VQA
 
-Trả lời câu hỏi tiếng Việt về ảnh, trên
-`5CD-AI/Viet-ViTextVQA-gemini-VQA`: 9.594 ảnh, 31.420 cặp QA do Gemini 1.5
-Flash sinh, tập trung vào di tích, biển hiệu, chợ và sản phẩm Việt Nam. Nhiều
-chữ trong ảnh — đây là bài toán scene-text VQA, không chỉ nhận dạng vật thể.
+Project khởi đầu là VQA tiếng Việt trên `Viet-ViTextVQA-gemini-VQA` (9.594
+ảnh, 31.420 câu hỏi, đáp án do Gemini sinh). Sau khi đo baseline zero-shot,
+phát hiện: **một dòng chỉ dẫn văn phong đưa exact_match từ 0,5% lên 23,5%**,
+không train gì. Đọc tay 30 mẫu cho thấy ~87% câu trả lời zero-shot vốn đã
+đúng nội dung — metric bề mặt sai lệch gần 170 lần so với thực tế. Kết luận:
+fine-tune trên benchmark đó chủ yếu mua văn phong, không mua năng lực.
 
-| Chỉ số | Giá trị |
-|--------|---------|
-| Ảnh | 9.594 |
-| Cặp QA | 31.420 (trung bình 3,27/ảnh) |
-| Câu trả lời unique | 39.886 |
-| Độ dài câu hỏi | ~37 ký tự |
-| Độ dài câu trả lời | ~49 ký tự |
-| Độ dài description | ~558 ký tự |
+Đồng thời nhận ra: dữ liệu Vi-VQA không hợp để làm knowledge base — phần lớn
+"tri thức" trong trường `description` là fact hyperlocal (số điện thoại một
+cửa hàng cụ thể, địa chỉ một quán ăn) xuất hiện đúng một lần trong toàn
+dataset, không tái sử dụng được cho câu hỏi khác. Không phải encyclopedic
+knowledge, chỉ là caption gắn với một tấm ảnh.
 
-## Quyết định 1 — Generative, không phải classification
+**Quyết định: bỏ Vi-VQA, chuyển sang dataset thật sự hỗ trợ knowledge-graph
+traversal.**
 
-EDA (`notebooks/eda.ipynb`) đo độ phủ của tập nhãn cố định:
+## Vì sao FVQA, không phải các ứng viên khác
 
-| Top-K câu trả lời | Độ phủ dataset |
-|-------------------|----------------|
-| 100 | 0,95% |
-| 1.000 | 4,88% |
-| 5.000 | 17,61% |
+Đã kiểm chứng bằng cách **tải và đọc thật** dữ liệu (không chỉ tin mô tả),
+vì nhiều ứng viên tưởng khớp hoá ra không:
 
-Ngay cả câu trả lời phổ biến nhất ("Đây là khu chợ.") cũng chỉ xuất hiện 14 lần
-trên 31.420 mẫu. Không tồn tại tập nhãn nào phủ nổi bài toán này — phân phối
-long-tail bắt buộc phải dùng model sinh.
+| Ứng viên | Vấn đề phát hiện được sau khi tải |
+|---|---|
+| KVQA (AAAI'19) | Khớp nhất về khái niệm (multi-hop trên Wikidata thật) nhưng **link tải chết** (503 ở cả 4 URL, không mirror) |
+| M3-VQA (ACL'26) | Tải được, nhưng "evidence" là đoạn văn Wikipedia, **không có field triple** dù mô tả nói "khai thác Wikidata triples" |
+| WikiVQABench | Tải được, nhưng chỉ `{image, question, correct, wrongs}` — trắc nghiệm trơn, <1.000 mẫu |
+| Encyclopedic-VQA (ICCV'23) | Tải được, có cấu trúc 2-hop thật, nhưng KB là Wikipedia text — muốn graph tổng quát phải tự bóc hyperlink, mà **schema KB không giữ link** (verify qua tài liệu WikiWeb2M) |
+| FVQA 2.0 | Không phải bản mở rộng — chỉ là lớp phụ hẹp (474 ảnh, toàn câu hỏi so sánh), phụ thuộc FVQA 1.0 làm nền |
+| **FVQA 1.0** | **Tải được** (Dropbox, 451MB, verify sống), **225.434 triple thật** `(e1, relation, e2)` từ DBpedia/ConceptNet/WebChild — graph có sẵn, dùng ngay |
 
-Hai hướng đã loại:
+FVQA thắng không phải vì khớp nhất về mặt lý thuyết, mà vì là ứng viên
+**duy nhất tải được ngay và có graph thật sẵn sàng**, không cần giải pháp
+vòng (gọi API sống, tự bóc link, chờ server hồi phục).
 
-- **ViT + PhoBERT → softmax 1000 lớp.** Trần độ chính xác dưới 5% vì lý do trên.
-- **Seq2seq huấn luyện từ đầu.** Đắt, và vứt bỏ toàn bộ kiến thức pre-trained.
+## Dữ liệu thật khác README của chính FVQA
 
-Chọn: **Qwen3-VL-8B-Instruct + LoRA.** Đã biết tiếng Việt, đã biết OCR, fine-tune
-được trên GPU 24GB.
+Tải và soi trực tiếp (2026-08-24), phát hiện README của FVQA cũng sai:
 
-## Quyết định 2 — Không tự viết training loop
+| | README ghi | Thực tế |
+|---|---|---|
+| Số fact | 193.449 | **225.434** |
+| Số câu hỏi | 5.286 | **5.826** |
+| `fact` | 1 id | **list** (luôn đúng 1 phần tử, verify 5.826/5.826) |
+| `e1`/`e2` | "unique id" | **3 định dạng khác nhau**: ConceptNet URI, DBpedia URL, WebChild plain word |
 
-Training giao cho [`2U1/Qwen-VL-Series-Finetune`](https://github.com/2U1/Qwen-VL-Series-Finetune).
-Repo này chỉ lo dữ liệu, cấu hình và đánh giá — ba phần mà một trainer chung
-không thể làm thay.
+Code viết theo dữ liệu thật, không theo tài liệu.
 
-Đổi lại, phải chấp nhận phụ thuộc vào command-line của repo ngoài. Toàn bộ phần
-dịch từ config sang command line gom vào một chỗ duy nhất là
-`src/vivqa/train/command.py`, nên khi repo đó đổi flag chỉ phải sửa một file.
+## Kiến trúc
 
-## Quyết định 3 — Knowledge grounding từ `description`
+```
+data/fvqa.py         loader: parse JSON gốc, giữ nguyên fold test chính thức
+data/fvqa_graph.py    KnowledgeGraph: adjacency, find_entities, BFS, shortest_path
+data/grounding.py     oracle-fact grounding (tái dùng, chỉ đổi nguồn text)
+data/samples.py       IMAGE_TOKEN / assign_splits / write_split — dùng chung
+```
 
-Dataset có sẵn trường `description` mà Gemini dùng để viết câu trả lời. Rất
-nhiều câu trả lời vì thế khẳng định điều không đọc được từ pixel. Đưa
-description trở lại prompt biến bài toán thành đọc-hiểu thay vì bắt model nhớ
-kiến thức nó chưa từng được cho xem.
+`KnowledgeGraph` là graph traversal đúng nghĩa CS — build từ triple thật,
+BFS/shortest-path tự viết, không phải embedding retrieval giả lập. Verify
+trên toàn bộ 225.434 triple: build 3,78s, `find_entities("trumpet")` → BFS
+1-hop → tìm đúng fact oracle của một câu hỏi thật.
 
-Tắt mặc định — đây là giả thuyết cần đo, không phải cải tiến hiển nhiên. Quy
-trình A/B: [`docs/GROUNDING.md`](docs/GROUNDING.md).
+Hai điều kiện grounding tách biệt, đo hai câu hỏi khác nhau:
+- **Oracle fact**: model được cho thẳng đúng fact — đo cận trên
+- **Graph retrieval**: model tự tìm fact bằng `KnowledgeGraph.bfs` — đo cái
+  graph traversal thật sự đóng góp được
 
----
+## Đổi tên package: `vivqa` → `fvqa`
 
-## Đại tu (v0.2.0)
+Sau khi bỏ Vi-VQA hoàn toàn, rà lại toàn bộ codebase tìm chỗ đặt tên theo
+"Vi-VQA": không có class/module lẻ nào bị đặt tên vậy (đã xoá từ đợt refactor
+đầu) — chỗ duy nhất là **tên package** (`pyproject.toml`, 59 dòng import,
+lệnh CLI, biến môi trường `$VIVQA_CONFIG`). Đổi toàn bộ sang `fvqa`.
 
-### Vấn đề gốc: bốn bản sao của cùng một logic
-
-Logic chuẩn bị dataset tồn tại ở bốn nơi — `src/dataset_vlm.py`,
-`scripts/train_on_modal.py`, `notebooks/train_on_colab.ipynb`,
-`notebooks/quick_test.ipynb` — và đã lệch nhau. Bản Modal có chia train/val, bản
-`src/` thì không. Notebook đã sửa class model, `src/` thì chưa. Sửa một chỗ
-không lan sang chỗ khác, nên bug tích tụ.
-
-`config/config.yaml` tồn tại nhưng **không đường train nào đọc nó**.
-
-### Sau khi sửa
-
-Một package `vivqa` là nguồn duy nhất; local, Modal và CLI đều gọi vào đó.
-`config.yaml` thực sự điều khiển mọi thứ, có validate, có override `--set`.
-`scripts/train_on_modal.py` giảm từ 1.047 xuống 257 dòng vì phần logic đã
-chuyển vào package.
-
-### Lỗi đã sửa
-
-| # | Lỗi | Hậu quả |
-|---|-----|---------|
-| 1 | Rò rỉ dữ liệu giữa train/val | Modal shuffle theo *cặp QA* rồi mới chia, nên các câu hỏi về cùng một ảnh nằm ở cả hai phía. Model đã thấy ảnh validation lúc train, val loss đẹp hơn thực tế. Nay chia theo **ảnh**. |
-| 2 | Sai class model | `Qwen2VLForConditionalGeneration` cho checkpoint Qwen3-VL. Notebook đã sửa, `src/` và Modal thì chưa. |
-| 3 | Sai entrypoint train | Gọi `train.py` ở gốc repo trainer — file không tồn tại. Đúng là `deepspeed src/train/train_sft.py`. Script local và notebook Colab đều hỏng ngay dòng đầu. |
-| 4 | Hard-code flash attention | Bắt buộc `flash_attention_2` kể cả khi flash-attn không cài; mọi lần load đều lỗi. Nay tự lùi về SDPA. |
-| 5 | `src/inspect_data.py` import module không tồn tại | Tàn dư từ giai đoạn classification. Đã xoá. |
-| 6 | Hard-code path máy cá nhân | `/home/maidang/projects/...` trong `dataset_vlm.py`. |
-| 7 | Lệch version transformers | `requirements.txt` yêu cầu `>=4.57.0`, image Modal ghi `>=4.45.0` — có thể resolve về bản không có Qwen3-VL. |
-| 8 | `test.json` không bao giờ được sinh | README hướng dẫn dùng nó. Nay `prepare` sinh cả ba split. |
-| 9 | Config lệch code | `config.yaml` ghi bs=2/8, 3 epoch; Modal chạy bs=1/16, 2 epoch. |
-| 10 | Metric không như quảng cáo | README hứa BLEU/ROUGE/CIDEr, code chỉ có exact match. |
-| 11 | Đếm sample bằng `wc -l` trên file JSON | Ra số vô nghĩa. |
-| 12 | `2e-5` trong YAML parse ra **string** | YAML 1.1 cần `2.0e-5`. Config gốc viết `2e-5` ở mọi learning rate. Nay chấp nhận cả hai. |
-
-Lỗi 12 do chính test bắt được, không phải do đọc code.
-
-### Metric
-
-Exact match một mình vô dụng ở bài toán này: câu trả lời trung bình 49 ký tự
-tiếng Việt tự do, đúng nhưng diễn đạt khác vẫn 0 điểm. Đã thêm BLEU-4 mức
-corpus, ROUGE-L, CIDEr-D và similarity, tất cả viết bằng thư viện chuẩn.
-
-Chuẩn hoá NFC là bắt buộc: "à" lưu được bằng một codepoint hoặc "a" cộng dấu
-huyền tổ hợp — hiển thị y hệt, so sánh ra khác, và dataset có cả hai dạng.
-
-### Test
-
-186 test, không cần torch/transformers/GPU — các tầng config, data và metric cố
-tình không import thư viện nặng, nên `pytest` chạy trong vài giây.
-
----
-
-## Kết quả đo được (2026-08-23)
-
-Baseline zero-shot trên L4, 200 mẫu, greedy, `max_new_tokens=128`, không
-grounding, **không fine-tune gì**. Khác biệt duy nhất giữa hai cột là một câu
-chỉ dẫn văn phong đặt ở lượt system.
-
-| Metric | A1 — prompt trần | A2 — có chỉ dẫn văn phong | Tăng |
-|--------|-----------------:|--------------------------:|-----:|
-| exact_match | 0,50% | **23,50%** | 47× |
-| bleu | 6,85% | **60,36%** | 8,8× |
-| rouge_l | 26,06% | 69,56% | 2,7× |
-| similarity | 23,20% | 73,53% | 3,2× |
-| cider (0–10) | 0,08 | **5,25** | 66× |
-| Độ dài trung vị | 480 ký tự (10,1× đáp án chuẩn) | 40 ký tự (0,8×) | — |
-
-### Diễn giải
-
-Đọc tay 30 mẫu của A1 cho kết quả: **26/30 đúng nội dung nhưng sai văn phong**,
-3/30 sai suy luận, 1/30 sai OCR. Tức `exact_match = 0,50%` trong khi ~87% câu
-trả lời thực chất đúng — metric bề mặt sai lệch gần **170 lần** so với thực tế.
-
-Model gốc trả lời đúng rồi viết tiếp vài đoạn nữa. Ví dụ sạch nhất: hỏi số điện
-thoại, model trả về `0927 333323 - 0376877777` **giống hệt từng ký tự** đáp án
-chuẩn, nhưng bọc trong một đoạn giải thích nên mọi metric đều rớt.
-
-Hệ quả cho việc fine-tune: câu hỏi không còn là *"có đáng train không so với
-0,5%?"* mà là *"train mua thêm được gì so với 23,5% mà một dòng prompt cho
-không?"*. Phần lớn mức tăng before/after mà một run fine-tune sẽ báo cáo là
-**tuân thủ định dạng**, không phải năng lực trả lời.
-
-### OCR không phải nút thắt
-
-Giả thuyết ban đầu cho rằng scene-text tiếng Việt là chỗ yếu. Dữ liệu bác bỏ:
-model đọc chính xác `invaquangcaochuyennghiep.com`, `0927 333323 - 0376877777`,
-`KM 944 + 937,11`, `0931.16.61.16`. Chỉ 1/30 lỗi OCR thật (`VIETGAP` đọc thành
-`VƯƠNG CÁP`).
-
-### Nói dài thì bịa
-
-Trong A1, model tự mâu thuẫn về cùng một tấm ảnh: mẫu 110_0 nói Cầu Thanh Quýt
-ở Hà Nam, mẫu 110_1 nói Bình Thuận. Mẫu 102_1 bịa nguyên tiểu sử cho một
-thương hiệu nó đọc sai tên. Mẫu 101_0 rơi vào vòng lặp thoái hoá, sinh rác cho
-đến khi hết token.
-
-Cả ba biến mất ở A2. **Câu ngắn thì ít chỗ để bịa** — nên "chỉ học định dạng"
-không thuần tuý mỹ phẩm: nó cắt bề mặt hallucination.
-
-### Nhãn có nhiễu
-
-~10% mẫu đọc tay có nhãn hỏng hoặc câu hỏi mơ hồ (`104_1` hỏi "Mỳ gạo chũ được
-làm gì?" với đáp án "được HTX sản xuất và tiêu thụ"; `105_0` hỏi "Bức hình này
-của ai?"), cộng câu hỏi trùng lặp (`108_0` và `108_1`). Trần thực tế của
-exact_match vì thế vào khoảng 85–90%, không phải 100%.
-
-### Cảnh báo phương pháp
-
-Hai con số trên đều đo trên split `train` và prompt được chọn trên chính tập
-đó. Với số liệu công bố, hãy chọn prompt trên `train` rồi báo cáo trên `val`
-hoặc `test` (`vivqa eval --split val`).
-
----
+Nhân dịp dọn, tách phần dùng chung ra khỏi module Vi-VQA-specific đã xoá:
+`IMAGE_TOKEN`, `assign_splits`, `write_split` chuyển sang `data/samples.py`
+— ba hàm này không phụ thuộc dataset nào, chỉ tình cờ từng sống chung file
+với logic parse HuggingFace/Gemini đã bị xoá.
 
 ## Trạng thái
 
-Pipeline sẵn sàng, **model chưa được train**.
+Đã verify chạy thật, không chỉ viết xong:
 
-Baseline ở trên đã đo xong (`notebooks/baseline_a1.ipynb`). Việc còn lại:
+- `fvqa prepare` chạy trên dữ liệu thật: 5.826 câu hỏi → 2.914 train /
+  134 val / 2.778 test
+- `KnowledgeGraph` chạy trên 225.434 triple thật, BFS tìm đúng fact
+- `fvqa train --dry-run` build lệnh đúng trên output đã chuẩn bị
+- `fvqa eval` đọc đúng sample FVQA (chỉ chạy được điều kiện oracle-fact)
+- Test suite chạy không cần GPU
 
-1. **Tinh chỉnh prompt.** Đáp án Gemini theo khuôn cứng: nhắc lại chủ ngữ câu
-   hỏi rồi nêu đáp án (*"Tên của hàng này là Anytime."*). A2 trả lời cộc hơn
-   đáp án chuẩn (40 so với 48 ký tự) vì prompt bảo "không giải thích". Mô tả
-   đúng khuôn này có thể đẩy exact_match lên 35–45% — vẫn không train gì.
-2. **LoRA nhỏ** (~1.500 mẫu, 1 epoch, 1–2 giờ) để đo phần dư mà prompt không
-   lấy được. Đây là con số trung thực về giá trị của fine-tune, chứ không phải
-   phép so với baseline trần.
-3. **Full fine-tune 8–20 giờ**: dữ liệu hiện có không biện minh được.
+**Chưa làm:**
 
-### Hướng mở rộng
+1. **Vision-seeding** — chưa có bước "model tự nhìn ảnh → ra tên thực thể"
+   để seed graph. Hiện `find_entities()` cần bạn tự gõ tên thực thể.
+2. **Graph-retrieval trong `fvqa eval`** — `KnowledgeGraph` đứng độc lập,
+   gọi tay được, nhưng chưa có flag tự động chạy so sánh oracle vs
+   graph-retrieval như một eval mode.
+3. **Train thật** — cần GPU, chưa chạy (chỉ mới xác nhận dry-run đúng lệnh).
 
-1. Đo A/B tác động của grounding theo `docs/GROUNDING.md`.
-2. RAG: index description + scene-text của 9.594 ảnh, truy hồi lúc infer.
-   `apply_grounding` đã là chỗ nối sẵn.
-3. KB thực thể có cấu trúc cho entity linking và kiểm tra hallucination.
-4. Deploy thành API.
+## Hướng tiếp theo
+
+1. Hỏi Qwen3-VL "vật thể/cảnh/hành động chính trong ảnh là gì" → seed cho
+   `find_entities` — tận dụng model đã có trong `model.py`
+2. Nối graph-retrieval vào `evaluation/runner.py` như một điều kiện eval
+   thứ ba (không context / oracle fact / graph retrieval)
+3. Chạy 3 điều kiện so sánh, đo graph traversal đóng góp được bao nhiêu so
+   với biết trước đáp án
+4. Train thật, đối chứng với baseline zero-shot

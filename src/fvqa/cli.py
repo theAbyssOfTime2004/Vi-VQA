@@ -1,11 +1,11 @@
-"""Command-line interface: `vivqa <command>`.
+"""Command-line interface: `fvqa <command>`.
 
 Every subcommand loads `config/config.yaml`, so a hyperparameter is
 changed in one place and takes effect everywhere. `--set` applies ad-hoc
 overrides without editing the file:
 
-    vivqa prepare --set data.grounding.enabled=true
-    vivqa train --set training.num_train_epochs=3
+    fvqa prepare --set data.grounding.enabled=true
+    fvqa train --set training.num_train_epochs=3
 """
 
 from __future__ import annotations
@@ -17,10 +17,10 @@ import os
 import sys
 from typing import Sequence
 
-from vivqa.config import ConfigError, load_config
-from vivqa.utils import set_seed, setup_logging
+from fvqa.config import ConfigError, load_config
+from fvqa.utils import set_seed, setup_logging
 
-logger = logging.getLogger("vivqa")
+logger = logging.getLogger("fvqa")
 
 
 def _add_common(parser: argparse.ArgumentParser) -> None:
@@ -37,16 +37,15 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="vivqa", description=__doc__.split("\n")[0])
+    parser = argparse.ArgumentParser(prog="fvqa", description=__doc__.split("\n")[0])
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     show = subparsers.add_parser("config", help="Print the resolved configuration")
     _add_common(show)
 
-    prepare = subparsers.add_parser("prepare", help="Build train/val/test files from HuggingFace")
+    prepare = subparsers.add_parser("prepare", help="Build train/val/test files from a local FVQA release")
     _add_common(prepare)
-    prepare.add_argument("--limit", type=int, help="Process at most this many records")
-    prepare.add_argument("--overwrite", action="store_true", help="Re-encode existing images")
+    prepare.add_argument("--limit", type=int, help="Process at most this many questions")
 
     train = subparsers.add_parser("train", help="Fine-tune Qwen3-VL with LoRA")
     _add_common(train)
@@ -76,33 +75,20 @@ def _command_config(args, config) -> int:
 
 
 def _command_prepare(args, config) -> int:
-    if config.data.source == "fvqa":
-        from vivqa.data.fvqa import prepare_fvqa
+    from fvqa.data.fvqa import prepare_fvqa
 
-        counts = prepare_fvqa(config, limit=args.limit)
-        print("\nPrepared FVQA dataset")
-        print(f"  questions read   {counts.pop('questions', 0)}")
-        for split, count in counts.items():
-            print(f"  {split:<16} {count} samples -> {config.data.split_file(split)}")
-        print(f"  fold             {config.data.fvqa.fold}")
-        print(f"  grounding        {'on (oracle fact)' if config.data.grounding.enabled else 'off'}")
-        return 0
-
-    from vivqa.data.prepare import prepare
-
-    counts = prepare(config, limit=args.limit, overwrite=args.overwrite)
-
-    print("\nPrepared dataset")
-    print(f"  records read     {counts.pop('records', 0)}")
-    print(f"  images written   {counts.pop('images', 0)}")
+    counts = prepare_fvqa(config, limit=args.limit)
+    print("\nPrepared FVQA dataset")
+    print(f"  questions read   {counts.pop('questions', 0)}")
     for split, count in counts.items():
         print(f"  {split:<16} {count} samples -> {config.data.split_file(split)}")
-    print(f"  grounding        {'on' if config.data.grounding.enabled else 'off'}")
+    print(f"  fold             {config.data.fold}")
+    print(f"  grounding        {'on (oracle fact)' if config.data.grounding.enabled else 'off'}")
     return 0
 
 
 def _command_train(args, config) -> int:
-    from vivqa.train.runner import run_training
+    from fvqa.train.runner import run_training
 
     return run_training(
         config,
@@ -114,8 +100,8 @@ def _command_train(args, config) -> int:
 
 
 def _command_eval(args, config) -> int:
-    from vivqa.evaluation.runner import evaluate, format_scores
-    from vivqa.model import VQAModel
+    from fvqa.evaluation.runner import evaluate, format_scores
+    from fvqa.model import VQAModel
 
     model = VQAModel.from_pretrained(args.model_path, config)
     result = evaluate(
@@ -130,12 +116,12 @@ def _command_eval(args, config) -> int:
 
 
 def _command_chat(args, config) -> int:
-    from vivqa.model import VQAModel
+    from fvqa.model import VQAModel
 
     model = VQAModel.from_pretrained(args.model_path, config)
     grounding_on = config.data.grounding.enabled
 
-    print("\nVi-VQA interactive. Ctrl-D or 'quit' to exit.")
+    print("\nFVQA interactive. Ctrl-D or 'quit' to exit.")
     if grounding_on:
         print("Grounding is on: you will be asked for optional context after each question.")
 

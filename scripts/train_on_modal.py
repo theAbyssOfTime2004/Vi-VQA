@@ -1,23 +1,24 @@
-"""Vi-VQA training pipeline on Modal.
+"""FVQA training pipeline on Modal.
 
 All dataset, configuration and command-building logic lives in the
-`vivqa` package and is shared with the local run — this file contains
+`fvqa` package and is shared with the local run — this file contains
 only what is genuinely Modal-specific: the container image, the volumes
-and the function boundaries. The previous version reimplemented dataset
-preparation here, and the two copies had already drifted apart.
+and the function boundaries.
 
 Usage:
     pip install modal
     modal token new
-    modal secret create huggingface-secret HF_TOKEN=hf_...
+    modal secret create huggingface-secret HF_TOKEN=hf_...   # for the model only; FVQA itself needs no auth
 
     modal run scripts/train_on_modal.py --step prepare
     modal run scripts/train_on_modal.py --step train
     modal run scripts/train_on_modal.py --step evaluate
+    modal run scripts/train_on_modal.py --step baseline
     modal run scripts/train_on_modal.py::check_status
 
-Estimated training time for 2 epochs over ~31k QA pairs:
-    A10G ~20-25h · A100 ~8-12h · H100 ~4-6h
+FVQA is much smaller than a typical VQA fine-tuning corpus — 2,190 images,
+5,826 questions — so a run here is proportionally shorter than a dataset
+with tens of thousands of QA pairs would take on the same GPU.
 """
 
 from __future__ import annotations
@@ -29,11 +30,13 @@ import modal
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-app = modal.App("vi-vqa-training")
+app = modal.App("fvqa-training")
+
+FVQA_ZIP_URL = "https://www.dropbox.com/s/iyz6l7jhbt6jb7q/new_dataset_release.zip?dl=1"
 
 image = (
     modal.Image.from_registry("nvidia/cuda:12.4.0-devel-ubuntu22.04", add_python="3.11")
-    .apt_install("git", "wget")
+    .apt_install("git", "wget", "unzip")
     .pip_install(
         "torch>=2.0.0",
         "torchvision",
@@ -43,41 +46,39 @@ image = (
         "peft>=0.13.0",
         "bitsandbytes>=0.44.0",
         "deepspeed>=0.15.0",
-        "datasets>=3.0.0",
-        "pillow>=10.0.0",
         "qwen-vl-utils>=0.0.8",
-        "huggingface_hub>=0.26.0",
         "pyyaml>=6.0",
-        "tqdm",
         "tensorboard",
     )
-    .env({"CUDA_HOME": "/usr/local/cuda", "VIVQA_CONFIG": "/root/config/config.yaml"})
+    .env({"CUDA_HOME": "/usr/local/cuda", "FVQA_CONFIG": "/root/config/config.yaml"})
     .run_commands("pip install flash-attn --no-build-isolation || echo 'flash-attn unavailable'")
     # Ship the package and config instead of duplicating their logic here.
-    .add_local_dir(REPO_ROOT / "src" / "vivqa", remote_path="/root/vivqa")
+    .add_local_dir(REPO_ROOT / "src" / "fvqa", remote_path="/root/fvqa")
     .add_local_dir(REPO_ROOT / "config", remote_path="/root/config")
 )
 
-data_volume = modal.Volume.from_name("vi-vqa-data", create_if_missing=True)
-checkpoint_volume = modal.Volume.from_name("vi-vqa-checkpoints", create_if_missing=True)
+data_volume = modal.Volume.from_name("fvqa-data", create_if_missing=True)
+checkpoint_volume = modal.Volume.from_name("fvqa-checkpoints", create_if_missing=True)
 
 DATA_DIR = "/data"
 CHECKPOINT_DIR = "/checkpoints"
+FVQA_ROOT = f"{DATA_DIR}/fvqa"
 VOLUMES = {DATA_DIR: data_volume, CHECKPOINT_DIR: checkpoint_volume}
 
 # Point the shared config at the mounted volumes. Everything else —
 # learning rates, LoRA rank, grounding — still comes from config.yaml.
 VOLUME_OVERRIDES = [
     f"data.data_dir={DATA_DIR}",
-    f"data.image_folder={DATA_DIR}/images",
-    f"training.output_dir={CHECKPOINT_DIR}/qwen3vl-vivqa",
+    f"data.root={FVQA_ROOT}",
+    f"data.image_folder={FVQA_ROOT}/new_dataset_release/images",
+    f"training.output_dir={CHECKPOINT_DIR}/qwen3vl-fvqa",
 ]
 
 
 def _load(extra_overrides: list[str] | None = None):
     """Load the shared config with volume paths applied."""
-    from vivqa.config import load_config
-    from vivqa.utils import setup_logging
+    from fvqa.config import load_config
+    from fvqa.utils import setup_logging
 
     setup_logging()
     return load_config(overrides=VOLUME_OVERRIDES + list(extra_overrides or []))
@@ -92,32 +93,46 @@ def _login() -> None:
         print("✓ logged in to HuggingFace")
 
 
+def _ensure_fvqa_downloaded(root: str) -> None:
+    """Download and extract the FVQA release into `root` if not already there.
+
+    FVQA is not on HuggingFace, so there is no `datasets.load_dataset` to
+    lean on — a plain HTTP download + zip extraction, done once per volume.
+    """
+    import subprocess
+    import zipfile
+
+    marker = os.path.join(root, "Name_Lists")
+    if os.path.isdir(marker):
+        print(f"✓ FVQA already present at {root}")
+        return
+
+    os.makedirs(root, exist_ok=True)
+    zip_path = "/tmp/fvqa.zip"
+    print(f"downloading FVQA release (~451MB) from {FVQA_ZIP_URL}")
+    subprocess.run(["wget", "-q", "-O", zip_path, FVQA_ZIP_URL], check=True)
+
+    print("extracting...")
+    with zipfile.ZipFile(zip_path) as archive:
+        archive.extractall(root)
+    os.remove(zip_path)
+    print(f"✓ extracted to {root}")
+
+
 @app.function(
     image=image,
     volumes={DATA_DIR: data_volume},
-    secrets=[modal.Secret.from_name("huggingface-secret")],
     timeout=3600,
     memory=8192,
 )
-def prepare_dataset(
-    limit: int | None = None,
-    grounding: bool = False,
-    streaming: bool = False,
-):
-    """Download the dataset and write train/val/test splits to the volume.
+def prepare_dataset(limit: int | None = None, grounding: bool = False):
+    """Download FVQA (if needed) and write train/val/test splits to the volume."""
+    from fvqa.data.fvqa import prepare_fvqa
 
-    `streaming=True` with a `limit` fetches only the records it needs
-    instead of pulling the whole split first.
-    """
-    from vivqa.data.prepare import prepare
+    config = _load([f"data.grounding.enabled={str(grounding).lower()}"])
 
-    _login()
-    config = _load([
-        f"data.grounding.enabled={str(grounding).lower()}",
-        f"data.streaming={str(streaming).lower()}",
-    ])
-
-    counts = prepare(config, limit=limit)
+    _ensure_fvqa_downloaded(config.data.root)
+    counts = prepare_fvqa(config, limit=limit)
     data_volume.commit()
 
     print(f"\n✓ prepared: {counts}")
@@ -143,7 +158,7 @@ def train_model(
 
     Arguments left as None fall back to config/config.yaml.
     """
-    from vivqa.train.runner import run_training
+    from fvqa.train.runner import run_training
 
     _login()
 
@@ -195,9 +210,9 @@ def evaluate_model(
 
     With neither model_path nor checkpoint, the newest checkpoint is used.
     """
-    from vivqa.evaluation.runner import evaluate, format_scores
-    from vivqa.model import VQAModel
-    from vivqa.train.command import resolve_model_source
+    from fvqa.evaluation.runner import evaluate, format_scores
+    from fvqa.model import VQAModel
+    from fvqa.train.command import resolve_model_source
 
     config = _load()
     path = resolve_model_source(
@@ -254,7 +269,6 @@ def main(
     num_epochs: int = 0,
     num_eval: int = 200,
     grounding: bool = False,
-    streaming: bool = False,
     limit: int = 0,
     baseline: bool = False,
 ):
@@ -264,9 +278,8 @@ def main(
         step: prepare | train | evaluate | baseline | all
         num_epochs: 0 to use the value in config.yaml
         num_eval: samples to score; -1 for the whole split
-        grounding: prepare the data with description grounding enabled
-        streaming: stream the dataset instead of downloading the split
-        limit: process at most this many records; 0 for all
+        grounding: prepare the data with oracle-fact grounding enabled
+        limit: process at most this many questions; 0 for all
         baseline: score the un-finetuned base model instead of a checkpoint
 
     Scoring the base model needs no training at all:
@@ -278,9 +291,7 @@ def main(
 
     if step in ("prepare", "all"):
         print("\n📦 preparing dataset")
-        print(prepare_dataset.remote(
-            limit=limit or None, grounding=grounding, streaming=streaming
-        ))
+        print(prepare_dataset.remote(limit=limit or None, grounding=grounding))
 
     if step in ("train", "all"):
         print("\n🎯 training")

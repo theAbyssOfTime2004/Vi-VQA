@@ -1,54 +1,47 @@
-# Vi-VQA configuration.
+# FVQA configuration.
 #
 # This file is the single source of truth. Every entry point reads it:
-#   vivqa prepare / vivqa train / vivqa eval / vivqa chat
+#   fvqa prepare / fvqa train / fvqa eval / fvqa chat
 #   scripts/train_qwen3vl.sh  (local)
 #   scripts/train_on_modal.py (Modal)
 # Nothing below is duplicated in code — override with --set key=value.
 
-project_name: "Vi-VQA"
+project_name: "FVQA"
 seed: 42
 
 data:
-  dataset_name: "5CD-AI/Viet-ViTextVQA-gemini-VQA"
+  # FVQA has to be downloaded and extracted by hand (no datasets.load_dataset
+  # support — this is a real knowledge graph, 225,434 DBpedia/ConceptNet/
+  # WebChild triples, not a HuggingFace text dataset):
+  # https://www.dropbox.com/s/iyz6l7jhbt6jb7q/new_dataset_release.zip?dl=1
   data_dir: "./data"
-  image_folder: "./data/images"
-  image_quality: 95
+  root: "./data/fvqa"                              # directory the zip extracts into
+  image_folder: "./data/fvqa/new_dataset_release/images"  # override together with root
+  fold: 0                                           # FVQA ships 5 official train/test folds (0-4)
+  max_hops: 2                                       # graph traversal depth for the retrieval experiment
 
-  # "huggingface" (default) loads dataset_name via datasets.load_dataset.
-  # "fvqa" loads a local FVQA release instead (see data.fvqa below) — a real
-  # knowledge graph (225,434 DBpedia/ConceptNet/WebChild triples), not free
-  # text. Download: https://www.dropbox.com/s/iyz6l7jhbt6jb7q/new_dataset_release.zip?dl=1
-  source: "huggingface"
-  fvqa:
-    root: "./data/fvqa"    # directory the FVQA zip extracts into
-    fold: 0                # FVQA ships 5 official train/test folds (0-4)
-    max_hops: 2             # graph traversal depth for the retrieval experiment
-
-  # Stream instead of downloading the whole split up front. Combine with
-  # `vivqa prepare --limit N` to fetch only the first N records — matters on
-  # Colab/Kaggle where disk is tight.
-  streaming: false
-
-  # Fractions must sum to 1.0. Splitting happens at the *image* level so
-  # QA pairs from one image never straddle the train/val boundary.
+  # Fractions must sum to 1.0. FVQA's own test fold is kept intact (so
+  # scores stay comparable to the paper); only train/val are carved with
+  # this, at the *image* level, so QA pairs about one image never straddle
+  # the boundary.
   splits:
     train: 0.90
     val: 0.05
     test: 0.05
 
-  # Knowledge grounding: the dataset ships a ~558-char `description` per
-  # image that Gemini used to write the answers. Feeding it back in turns
-  # the task from "recall this landmark" into "read this context".
-  # Set enabled: true to build a grounded copy of the data.
+  # Oracle-fact grounding: feed the question's one correct supporting fact
+  # (its `surface` text) back into the prompt. Answers a different question
+  # than graph retrieval (KnowledgeGraph.bfs) — "if the model is simply told
+  # the right fact, how much does it help?" vs. "if it has to find that fact
+  # itself by walking the graph, how much is lost?"
   grounding:
     enabled: false
     mode: "prefix"        # prefix = inline in the user turn, system = separate system turn
-    max_chars: 1200       # descriptions longer than this are truncated on a sentence boundary
-    # 'prefix' mode: context + question in one user turn.
-    template: "Thông tin tham khảo về bức ảnh:\n{description}\n\nDựa vào ảnh và thông tin trên, hãy trả lời: {question}"
-    # 'system' mode: context only, question stays in the user turn.
-    system_template: "Thông tin tham khảo về bức ảnh:\n{description}"
+    max_chars: 1200       # facts longer than this are truncated on a sentence boundary
+    # 'prefix' mode: fact + question in one user turn.
+    template: "Fact: {description}\n\nUsing the fact above, answer: {question}"
+    # 'system' mode: fact only, question stays in the user turn.
+    system_template: "Fact: {description}"
 
 model:
   model_id: "Qwen/Qwen3-VL-8B-Instruct"
@@ -75,7 +68,7 @@ model:
     bnb_4bit_use_double_quant: true
 
 training:
-  output_dir: "./checkpoints/qwen3vl-vivqa"
+  output_dir: "./checkpoints/qwen3vl-fvqa"
   num_train_epochs: 2
   per_device_train_batch_size: 1
   per_device_eval_batch_size: 1

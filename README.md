@@ -1,8 +1,13 @@
-# Vi-VQA: Visual Question Answering tiếng Việt với Qwen3-VL
+# FVQA: Fact-based VQA với knowledge-graph traversal, trên Qwen3-VL
 
-Fine-tune **Qwen3-VL-8B-Instruct** bằng LoRA trên
-[Viet-ViTextVQA-gemini-VQA](https://huggingface.co/datasets/5CD-AI/Viet-ViTextVQA-gemini-VQA)
-— 9.594 ảnh, 31.420 cặp hỏi–đáp về di tích, biển hiệu và sản phẩm Việt Nam.
+Fine-tune / eval **Qwen3-VL-8B-Instruct** trên
+[FVQA](https://github.com/wangpengnorman/FVQA) — 2.190 ảnh (COCO + ImageNet),
+5.826 câu hỏi, mỗi câu neo vào đúng một fact trong **225.434 triple**
+`(e1, relation, e2)` thật từ DBpedia/ConceptNet/WebChild.
+
+Khác với các VQA dataset dùng free text làm "kiến thức", FVQA ship một
+**đồ thị tri thức thật** — đủ để tự dựng graph và viết BFS/DFS/shortest-path
+lên đó, không phải retrieval bằng embedding.
 
 ## Cài đặt
 
@@ -10,52 +15,50 @@ Fine-tune **Qwen3-VL-8B-Instruct** bằng LoRA trên
 git clone <repo-url> && cd Vi-VQA
 python3 -m venv .venv && source .venv/bin/activate
 
-pip install -e '.[train]'                 # data + inference + training
+pip install -e '.[train]'
 pip install flash-attn --no-build-isolation   # tuỳ chọn, nhanh hơn đáng kể
-
-huggingface-cli login                     # dataset là gated, cần request access
 ```
 
-`transformers>=4.57.0` là yêu cầu bắt buộc, không phải khuyến nghị:
-`Qwen3VLForConditionalGeneration` không tồn tại ở bản thấp hơn.
+`transformers>=4.57.0` là yêu cầu bắt buộc: `Qwen3VLForConditionalGeneration`
+không tồn tại ở bản thấp hơn.
+
+### Tải dữ liệu
+
+FVQA không có trên HuggingFace — tải và giải nén thủ công:
+
+```bash
+curl -L -o fvqa.zip "https://www.dropbox.com/s/iyz6l7jhbt6jb7q/new_dataset_release.zip?dl=1"
+unzip fvqa.zip -d data/fvqa
+# ra: data/fvqa/Name_Lists/  và  data/fvqa/new_dataset_release/
+```
 
 ## Dùng
 
-Mọi thứ đi qua một CLI duy nhất. Hyperparameter nằm ở `config/config.yaml`,
-không rải trong code, và `--set` cho phép override tại chỗ.
-
 ```bash
-vivqa config                              # in ra cấu hình đã resolve
-vivqa prepare                             # HF dataset -> train/val/test JSON + ảnh
-vivqa train                               # fine-tune LoRA
-vivqa eval --model-path ./checkpoints/qwen3vl-vivqa/checkpoint-1500
-vivqa chat --model-path ./checkpoints/qwen3vl-vivqa/checkpoint-1500
+fvqa config                               # in ra cấu hình đã resolve
+fvqa prepare                              # local release -> train/val/test JSON
+fvqa train                                # fine-tune LoRA
+fvqa eval --model-path ./checkpoints/qwen3vl-fvqa/checkpoint-1500
+fvqa chat --model-path ./checkpoints/qwen3vl-fvqa/checkpoint-1500
 ```
 
 ```bash
 # Ví dụ override
-vivqa prepare --limit 100 --set data.streaming=true  # chỉ kéo 100 record, không tải cả split
-vivqa train --dry-run                                # in lệnh train, không chạy
-vivqa train --num-gpus 4 --set training.num_train_epochs=3
-vivqa eval --model-path <ckpt> --num-samples -1 --output results.json
+fvqa prepare --limit 100                            # thử nhanh trên 100 câu hỏi
+fvqa prepare --set data.fold=2                      # đổi fold train/test (0-4)
+fvqa train --dry-run                                # in lệnh train, không chạy
+fvqa eval --model-path <ckpt> --num-samples -1 --output results.json
 ```
 
 ## Baseline zero-shot
 
-`--model-path` nhận thẳng HF model id, nên chấm được model **chưa fine-tune**
-mà không cần train gì:
+`--model-path` nhận thẳng HF model id, chấm được model **chưa fine-tune**
+mà không cần train gì — luôn chạy cái này trước khi bắt đầu một run nhiều giờ:
 
 ```bash
-vivqa eval --model-path Qwen/Qwen3-VL-8B-Instruct \
-           --num-samples 200 --output ./results/baseline.json
+fvqa eval --model-path Qwen/Qwen3-VL-8B-Instruct \
+          --num-samples 200 --output ./results/baseline.json
 ```
-
-Hãy chạy cái này **trước** khi bắt đầu một run 8–20 giờ: nếu base model đã trả
-lời đúng nội dung mà chỉ khác văn phong, thì phần lớn mức tăng của fine-tune là
-học phong cách chứ không phải học năng lực.
-
-`notebooks/baseline_a1.ipynb` chạy trọn quy trình đó trên Colab — chấm 200 mẫu
-rồi in 30 mẫu kèm rubric phân loại (văn phong / suy luận / OCR).
 
 Chạy trên Modal:
 
@@ -65,107 +68,79 @@ modal run scripts/train_on_modal.py --step all
 modal run scripts/train_on_modal.py::check_status
 ```
 
-Modal và local dùng **chung** module sinh lệnh train, nên hai đường chạy không
-thể lệch nhau.
+Modal và local dùng **chung** module sinh lệnh train, nên hai đường chạy
+không thể lệch nhau.
 
-## Knowledge grounding
+## Hai kiểu grounding — đo hai câu hỏi khác nhau
 
-Dataset có sẵn trường `description` (~558 ký tự/ảnh) mà Gemini đã dùng để viết
-câu trả lời — tức là kiến thức nằm sẵn trong dữ liệu nhưng trước đây bị bỏ phí
-hoàn toàn. Bật nó lên:
-
-```bash
-vivqa prepare --set data.grounding.enabled=true
-```
-
-Chi tiết, hai chế độ `prefix`/`system`, và quy trình A/B để đo tác động:
-[`docs/GROUNDING.md`](docs/GROUNDING.md).
-
-## FVQA — knowledge graph thật
-
-Vi-VQA/Encyclopedic-style grounding dùng free text. **FVQA** khác hẳn: 225.434
-triple `(e1, relation, e2)` thật từ DBpedia/ConceptNet/WebChild, đủ để build
-một đồ thị và tự viết BFS/DFS trên đó — không phải nhét text vào prompt.
+**Oracle fact** — model được cho thẳng đúng fact hỗ trợ câu hỏi
+(`fact_surface`), tách biệt với việc tự đi tìm fact đó:
 
 ```bash
-# Tải và giải nén thủ công (không có datasets.load_dataset cho FVQA):
-# https://www.dropbox.com/s/iyz6l7jhbt6jb7q/new_dataset_release.zip?dl=1 (~451MB)
-# Giải nén ra một thư mục có Name_Lists/ và new_dataset_release/
-
-vivqa prepare \
-  --set data.source=fvqa \
-  --set data.fvqa.root=/path/to/extracted
+fvqa prepare --set data.grounding.enabled=true
 ```
 
-FVQA có sẵn 5 fold train/test (0-4, chọn bằng `data.fvqa.fold`) — `test` giữ
-nguyên theo đúng fold gốc để so được với kết quả trong paper; `val` được cắt
-từ `train` bằng cùng `assign_splits` dùng cho Vi-VQA.
+Đo *"biết trước fact đúng thì giúp được bao nhiêu"* — cận trên, không phải
+kết quả pipeline thật.
+
+**Graph retrieval** — model (hoặc bạn) tự đi tìm fact bằng cách duyệt đồ thị,
+không được cho biết trước đáp án:
 
 ```python
-from vivqa.data import KnowledgeGraph
+from fvqa.data import KnowledgeGraph
 
-g = KnowledgeGraph.from_facts_file("new_dataset_release/all_fact_triples_release.json")
+g = KnowledgeGraph.from_facts_file("data/fvqa/new_dataset_release/all_fact_triples_release.json")
 seeds = g.find_entities("trumpet")           # ['/c/en/trumpet', '/c/en/trumpet/n', ...]
 facts = g.bfs(seeds, max_hops=1)              # BFS thật, không phải embedding search
 path = g.shortest_path(entity_a, entity_b)    # None nếu không nối được
 ```
 
-`vivqa prepare --set data.grounding.enabled=true` với FVQA cho ra **oracle
-fact** — model được cho thẳng đúng fact hỗ trợ câu hỏi (`fact_surface`), tách
-biệt với việc tự đi tìm fact đó bằng `KnowledgeGraph.bfs`. Hai điều kiện này
-đo hai câu hỏi khác nhau: oracle đo "biết fact đúng thì giúp được bao nhiêu",
-graph retrieval đo "tự tìm fact đúng bằng cách duyệt đồ thị thì còn lại bao
-nhiêu". Phần "seed graph bằng thực thể model tự nhận diện từ ảnh, rồi rank
-kết quả BFS" chưa được nối vào eval — `KnowledgeGraph` đã có sẵn để lắp thêm.
+Đo *"tự tìm fact đúng bằng graph thì còn lại bao nhiêu"* — hiệu số giữa hai
+điều kiện là thước đo thật cho việc graph có đáng hay không.
 
-Template grounding mặc định là tiếng Việt (kế thừa từ Vi-VQA) — FVQA là tiếng
-Anh, nhớ override:
-```bash
---set 'data.grounding.template=Context: {description}\n\nQuestion: {question}'
-```
+**Chưa nối vào `fvqa eval`**: hiện tại eval chỉ chạy được điều kiện oracle.
+Đường graph-retrieval — seed từ thực thể model tự nhận diện trong ảnh, BFS,
+rank fact, nhét vào prompt — `KnowledgeGraph` đã có sẵn, chỉ chưa lắp vào
+`evaluation/runner.py`.
 
 ## Cấu trúc
 
 ```
 config/config.yaml          # nguồn cấu hình duy nhất cho mọi đường chạy
-src/vivqa/
+src/fvqa/
   config.py                 # load + validate config thành dataclass
-  cli.py                    # vivqa prepare | train | eval | chat | config
+  cli.py                    # fvqa prepare | train | eval | chat | config
   model.py                  # nạp Qwen3-VL, sinh câu trả lời
   data/
-    prepare.py              # HF dataset -> JSON theo format Qwen-VL
-    grounding.py            # ngữ cảnh từ description (oracle fact với FVQA)
     fvqa.py                 # loader FVQA (không qua datasets.load_dataset)
-    fvqa_graph.py           # KnowledgeGraph: BFS/DFS/shortest-path thật
+    fvqa_graph.py            # KnowledgeGraph: BFS/DFS/shortest-path thật
+    grounding.py             # nhét fact vào prompt (oracle-fact grounding)
+    samples.py                # IMAGE_TOKEN, assign_splits, write_split — dùng chung
   train/
-    command.py              # config -> argv cho trainer
-    runner.py               # clone trainer repo và chạy
+    command.py               # config -> argv cho trainer
+    runner.py                # clone trainer repo và chạy
   evaluation/
-    metrics.py              # exact match, similarity, BLEU, ROUGE-L, CIDEr
-    runner.py               # sinh dự đoán và chấm điểm
+    metrics.py                # exact match, similarity, BLEU, ROUGE-L, CIDEr
+    runner.py                 # sinh dự đoán và chấm điểm
 scripts/
-  train_qwen3vl.sh          # wrapper mỏng cho chạy local
-  train_on_modal.py         # phần thuộc về Modal, không chứa logic dataset
-tests/                      # 186 test, chạy không cần GPU
-notebooks/
-  eda.ipynb                 # phân tích dataset
-  baseline_a1.ipynb         # chấm base model zero-shot, không train
-  quick_test.ipynb          # smoke test môi trường
-  train_on_colab.ipynb      # training trên Colab
+  train_qwen3vl.sh           # wrapper mỏng cho chạy local
+  train_on_modal.py          # phần thuộc về Modal, không chứa logic dataset
+tests/                       # chạy không cần GPU
 ```
 
 ## Kiến trúc
 
 **Model:** Qwen3-VL-8B-Instruct — vision encoder ViT, LLM 8B, projector
-vision-language, hỗ trợ OCR 32 ngôn ngữ trong đó có tiếng Việt.
+vision-language.
 
-**Fine-tune:** LoRA rank 128 / alpha 256 trên LLM và projector, đóng băng vision
-encoder. Batch hiệu dụng 16 (1 × 16 gradient accumulation), bf16, gradient
-checkpointing — vừa 24GB VRAM.
+**Fine-tune:** LoRA rank 128 / alpha 256 trên LLM và projector, đóng băng
+vision encoder. Batch hiệu dụng 16 (1 × 16 gradient accumulation), bf16,
+gradient checkpointing — vừa 24GB VRAM.
 
-**Vì sao generative chứ không phải classification:** EDA (`notebooks/eda.ipynb`)
-cho thấy 39.886 câu trả lời unique, top-5000 chỉ cover 17,6% dataset. Không có
-tập nhãn cố định nào phủ nổi bài toán này.
+**Split:** FVQA có sẵn 5 fold train/test chính thức (0-4) — `test` giữ
+nguyên theo đúng fold gốc để so được với kết quả trong paper; `val` được cắt
+từ `train` bằng `assign_splits` (chia theo *ảnh*, không phải theo câu hỏi,
+để câu hỏi về cùng một ảnh không rơi vào cả hai phía ranh giới).
 
 Training thực tế được giao cho
 [`2U1/Qwen-VL-Series-Finetune`](https://github.com/2U1/Qwen-VL-Series-Finetune);
@@ -181,46 +156,42 @@ rouge_l       F-measure trên LCS, beta=1.2
 cider         CIDEr-D, thang 0–10
 ```
 
-Chỉ dùng exact match cho bài toán này là vô nghĩa: câu trả lời trung bình ~49 ký
-tự tiếng Việt tự do, một câu đúng nhưng diễn đạt khác sẽ được 0 điểm. Các metric
-còn lại chấm điểm từng phần.
-
-Chuẩn hoá NFC không phải chi tiết thẩm mỹ: "à" có thể được lưu bằng một codepoint
-hoặc bằng "a" cộng dấu huyền tổ hợp. Hai dạng hiển thị y hệt nhau, so sánh ra
-khác nhau, và dataset có cả hai.
+Chỉ dùng exact match không đủ cho câu trả lời tự do: một câu đúng nhưng diễn
+đạt khác vẫn được 0 điểm. Các metric còn lại chấm điểm từng phần.
 
 ## Phát triển
 
 ```bash
 pip install -e '.[dev]'
-pytest                       # 186 test, không cần torch/transformers
+pytest                       # không cần torch/transformers
 ```
 
-Tầng config, data và metrics cố tình không import torch, nên test chạy trong vài
-giây trên máy không GPU.
+Tầng config, data và metrics cố tình không import torch, nên test chạy
+trong vài giây trên máy không GPU.
 
 ## Yêu cầu phần cứng
 
 | GPU | Cấu hình | Thời gian (2 epoch) |
 |-----|----------|---------------------|
-| RTX 3080 (10GB) | QLoRA 4-bit | ~30h |
-| RTX 3090 (24GB) | LoRA | ~20–25h |
-| A100 (40GB) | LoRA | ~8–12h |
-| H100 | LoRA | ~4–6h |
+| RTX 3080 (10GB) | QLoRA 4-bit | vài giờ |
+| RTX 3090 (24GB) | LoRA | vài giờ |
+| A100 (40GB) | LoRA | 1-2 giờ |
 
-Hết VRAM thì giảm `image_max_pixels` trước, rồi mới tới batch size:
+FVQA nhỏ hơn nhiều VQA dataset khác (2.190 ảnh, 5.826 câu hỏi) — train
+nhanh hơn hẳn so với dataset cỡ chục nghìn ảnh. Hết VRAM thì giảm
+`image_max_pixels` trước, rồi mới tới batch size:
 
 ```bash
-vivqa train --set model.image_max_pixels=589824 \
-            --set training.gradient_accumulation_steps=32
+fvqa train --set model.image_max_pixels=589824 \
+           --set training.gradient_accumulation_steps=32
 ```
 
 ## Tham khảo
 
 - [Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct)
-- [Viet-ViTextVQA-gemini-VQA](https://huggingface.co/datasets/5CD-AI/Viet-ViTextVQA-gemini-VQA)
+- [FVQA — GitHub](https://github.com/wangpengnorman/FVQA)
+- [FVQA paper — arXiv:1606.05433](https://arxiv.org/abs/1606.05433)
 - [Qwen-VL-Series-Finetune](https://github.com/2U1/Qwen-VL-Series-Finetune)
-- [ViTextVQA paper — arXiv:2404.10652](https://arxiv.org/abs/2404.10652)
 - [LoRA — arXiv:2106.09685](https://arxiv.org/abs/2106.09685)
 
 ## Giấy phép

@@ -18,7 +18,7 @@ import os
 import re
 from typing import Sequence
 
-from vivqa.config import Config
+from fvqa.config import Config
 
 __all__ = [
     "REPO_URL",

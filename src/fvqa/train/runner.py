@@ -6,8 +6,8 @@ import logging
 import os
 import subprocess
 
-from vivqa.config import Config
-from vivqa.train.command import REPO_URL, TRAIN_ENTRYPOINT, build_train_command, format_command
+from fvqa.config import Config
+from fvqa.train.command import REPO_URL, TRAIN_ENTRYPOINT, build_train_command, format_command
 
 __all__ = ["ensure_trainer_repo", "run_training"]
 
@@ -67,7 +67,7 @@ def run_training(
 
     if not os.path.exists(train_path):
         raise FileNotFoundError(
-            f"training data not found at {train_path}. Run `vivqa prepare` first."
+            f"training data not found at {train_path}. Run `fvqa prepare` first."
         )
     if not os.path.isdir(image_folder):
         raise FileNotFoundError(f"image folder not found: {image_folder}")

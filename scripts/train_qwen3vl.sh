@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Fine-tune Qwen3-VL on Vi-VQA locally.
+# Fine-tune Qwen3-VL on FVQA locally.
 #
 #   bash scripts/train_qwen3vl.sh                    # use config/config.yaml as-is
 #   bash scripts/train_qwen3vl.sh --dry-run          # print the command, run nothing
@@ -15,21 +15,21 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-if ! python3 -c "import vivqa" 2>/dev/null; then
-    echo "❌ The vivqa package is not importable."
+if ! python3 -c "import fvqa" 2>/dev/null; then
+    echo "❌ The fvqa package is not importable."
     echo "   Install it with: pip install -e '.[train]'"
     exit 1
 fi
 
 if [ ! -f "./data/train.json" ]; then
     echo "❌ No training data at ./data/train.json"
-    echo "   Prepare it with: vivqa prepare"
+    echo "   Prepare it with: fvqa prepare"
     exit 1
 fi
 
-echo "🚀 Fine-tuning Qwen3-VL on Vi-VQA"
-python3 -m vivqa.cli train "$@"
+echo "🚀 Fine-tuning Qwen3-VL on FVQA"
+python3 -m fvqa.cli train "$@"
 
 echo
 echo "✅ Done. Checkpoints are under training.output_dir in config/config.yaml."
-echo "   Monitor with: tensorboard --logdir ./checkpoints/qwen3vl-vivqa"
+echo "   Monitor with: tensorboard --logdir ./checkpoints/qwen3vl-fvqa"

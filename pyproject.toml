@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "vivqa"
+name = "fvqa"
 version = "0.2.0"
-description = "Vietnamese Visual Question Answering with Qwen3-VL"
+description = "Fact-based Visual Question Answering with knowledge-graph traversal, on Qwen3-VL"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -18,13 +18,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Everything needed to turn the HuggingFace dataset into training files.
-data = [
-    "datasets>=3.0.0",
-    "pillow>=10.0.0",
-    "huggingface_hub>=0.26.0",
-    "tqdm",
-]
+# `fvqa prepare` reads the local FVQA release directly (stdlib json/os) —
+# no dataset-download extra needed, unlike a HuggingFace-backed loader.
+#
 # Everything needed to run the model. transformers>=4.57 is a hard
 # requirement: Qwen3VLForConditionalGeneration does not exist before it.
 infer = [
@@ -36,7 +32,7 @@ infer = [
     "peft>=0.13.0",
 ]
 train = [
-    "vivqa[data,infer]",
+    "fvqa[infer]",
     "bitsandbytes>=0.44.0",
     "deepspeed>=0.15.0",
     "tensorboard",
@@ -46,7 +42,7 @@ dev = [
 ]
 
 [project.scripts]
-vivqa = "vivqa.cli:main"
+fvqa = "fvqa.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

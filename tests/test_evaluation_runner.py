@@ -1,12 +1,20 @@
-"""Evaluation runner: prompt replay, scoring and failure handling."""
+"""Evaluation runner: prompt replay, scoring and failure handling.
+
+These tests exercise `evaluate()`/`messages_from_sample()` directly against
+hand-built sample files — not through `prepare_fvqa()` — since what is
+under test here is the evaluation runner's own behavior (prompt replay,
+failure handling, result provenance), independent of which dataset loader
+produced the file.
+"""
 
 import json
 
 import pytest
 
-from vivqa.config import Config
-from vivqa.data.prepare import IMAGE_TOKEN, prepare
-from vivqa.evaluation.runner import evaluate, load_split, messages_from_sample, reference_of
+from fvqa.config import Config
+from fvqa.data.grounding import apply_grounding
+from fvqa.data.samples import IMAGE_TOKEN, write_split
+from fvqa.evaluation.runner import evaluate, load_split, messages_from_sample, reference_of
 
 
 class FakeModel:
@@ -28,18 +36,46 @@ class FakeModel:
 def sample(with_system=False):
     conversations = []
     if with_system:
-        conversations.append({"from": "system", "value": "Ngữ cảnh: Chợ Bến Thành."})
+        conversations.append({"from": "system", "value": "Context: Bến Thành market."})
     conversations += [
-        {"from": "human", "value": f"{IMAGE_TOKEN}\nĐây là gì?"},
-        {"from": "gpt", "value": "Đây là khu chợ."},
+        {"from": "human", "value": f"{IMAGE_TOKEN}\nWhat is this?"},
+        {"from": "gpt", "value": "It is a market."},
     ]
     return {"id": "1_0", "image": "image_1.jpg", "image_id": "1", "conversations": conversations}
+
+
+def write_samples(config, records):
+    """Write already-built (question, answer, description) records to
+    `train.json`, applying grounding the same way a real loader would.
+
+    A stand-in for a dataset-specific prepare step: these tests are about
+    `evaluate()`'s own behavior, not about how any particular loader turns
+    raw records into samples.
+    """
+    written = []
+    for record in records:
+        prompt = apply_grounding(record["question"], record.get("description"), config.data.grounding)
+        turns: list[dict[str, str]] = []
+        if prompt.system:
+            turns.append({"from": "system", "value": prompt.system})
+        turns.append({"from": "human", "value": f"{IMAGE_TOKEN}\n{prompt.question}"})
+        turns.append({"from": "gpt", "value": record["answer"]})
+        written.append(
+            {
+                "id": f"{record['id']}_0",
+                "image": f"image_{record['id']}.jpg",
+                "image_id": str(record["id"]),
+                "conversations": turns,
+            }
+        )
+    write_split(written, config.data.split_file("train"))
+    return written
 
 
 class TestMessagesFromSample:
     def test_image_token_is_stripped_from_the_question(self):
         messages = messages_from_sample(sample(), "/data/images")
-        assert messages[-1]["content"][-1]["text"] == "Đây là gì?"
+        assert messages[-1]["content"][-1]["text"] == "What is this?"
 
     def test_image_path_is_joined_to_the_folder(self):
         messages = messages_from_sample(sample(), "/data/images")
@@ -48,14 +84,14 @@ class TestMessagesFromSample:
     def test_system_turn_is_carried_through(self):
         messages = messages_from_sample(sample(with_system=True), "/img")
         assert messages[0]["role"] == "system"
-        assert "Chợ Bến Thành" in messages[0]["content"][0]["text"]
+        assert "Bến Thành" in messages[0]["content"][0]["text"]
 
     def test_reference_answer_is_not_part_of_the_prompt(self):
         messages = messages_from_sample(sample(), "/img")
         assert all(m["role"] != "assistant" for m in messages)
 
     def test_reference_of_reads_the_gpt_turn(self):
-        assert reference_of(sample()) == "Đây là khu chợ."
+        assert reference_of(sample()) == "It is a market."
 
 
 class TestEvaluate:
@@ -70,17 +106,11 @@ class TestEvaluate:
     @pytest.fixture
     def prepared(self, config):
         records = [
-            {
-                "id": i,
-                "description": "Chợ Bến Thành nằm ở quận 1.",
-                "conversations": [
-                    {"role": "user", "content": f"Câu hỏi {i}?"},
-                    {"role": "assistant", "content": f"Trả lời {i}."},
-                ],
-            }
+            {"id": i, "description": "Bến Thành market is in district 1.",
+             "question": f"Question {i}?", "answer": f"Answer {i}."}
             for i in range(20)
         ]
-        prepare(config, records=records)
+        write_samples(config, records)
         return config
 
     def test_perfect_model_scores_full_marks(self, prepared):
@@ -98,25 +128,16 @@ class TestEvaluate:
         # The split file already contains the grounded prompt. Re-applying
         # grounding would score the model on a prompt it never saw.
         config.data.grounding.enabled = True
-        prepare(
-            config,
-            records=[
-                {
-                    "id": 0,
-                    "description": "Chợ Bến Thành nằm ở quận 1.",
-                    "conversations": [
-                        {"role": "user", "content": "Đây là gì?"},
-                        {"role": "assistant", "content": "Khu chợ."},
-                    ],
-                }
-            ],
-        )
+        write_samples(config, [
+            {"id": 0, "description": "Bến Thành market is in district 1.",
+             "question": "What is this?", "answer": "A market."}
+        ])
         model = FakeModel()
         evaluate(model, config, split="train")
 
         prompt = model.seen[0][-1]["content"][-1]["text"]
-        assert prompt.count("Chợ Bến Thành nằm ở quận 1.") == 1
-        assert prompt.count("Đây là gì?") == 1
+        assert prompt.count("Bến Thành market is in district 1.") == 1
+        assert prompt.count("What is this?") == 1
 
     def test_num_samples_limits_the_run(self, prepared):
         result = evaluate(FakeModel(), prepared, split="train", num_samples=5)
@@ -142,7 +163,7 @@ class TestEvaluate:
         assert result["grounding_enabled"] is False
 
     def test_missing_split_file_is_reported(self, config):
-        with pytest.raises(FileNotFoundError, match="vivqa prepare"):
+        with pytest.raises(FileNotFoundError, match="fvqa prepare"):
             evaluate(FakeModel(), config, split="val")
 
 
@@ -151,22 +172,22 @@ class TestStyleSystemPrompt:
         assert messages_from_sample(sample(), "/img")[0]["role"] == "user"
 
     def test_style_prompt_becomes_the_first_turn(self):
-        messages = messages_from_sample(sample(), "/img", system_prompt="Trả lời ngắn gọn.")
+        messages = messages_from_sample(sample(), "/img", system_prompt="Answer briefly.")
         assert messages[0]["role"] == "system"
-        assert messages[0]["content"][0]["text"] == "Trả lời ngắn gọn."
+        assert messages[0]["content"][0]["text"] == "Answer briefly."
 
     def test_style_prompt_precedes_a_grounding_turn(self):
         messages = messages_from_sample(
-            sample(with_system=True), "/img", system_prompt="Trả lời ngắn gọn."
+            sample(with_system=True), "/img", system_prompt="Answer briefly."
         )
         assert [m["role"] for m in messages] == ["system", "system", "user"]
         # Style first, then the grounding context it applies to.
-        assert messages[0]["content"][0]["text"] == "Trả lời ngắn gọn."
-        assert "Chợ Bến Thành" in messages[1]["content"][0]["text"]
+        assert messages[0]["content"][0]["text"] == "Answer briefly."
+        assert "Bến Thành" in messages[1]["content"][0]["text"]
 
     def test_question_is_untouched_by_the_style_prompt(self):
-        messages = messages_from_sample(sample(), "/img", system_prompt="Trả lời ngắn gọn.")
-        assert messages[-1]["content"][-1]["text"] == "Đây là gì?"
+        messages = messages_from_sample(sample(), "/img", system_prompt="Answer briefly.")
+        assert messages[-1]["content"][-1]["text"] == "What is this?"
 
 
 class TestResultProvenance:
@@ -175,28 +196,22 @@ class TestResultProvenance:
         config = Config()
         config.data.data_dir = str(tmp_path)
         config.data.image_folder = str(tmp_path / "images")
-        config.inference.system_prompt = "Trả lời ngắn gọn."
+        config.inference.system_prompt = "Answer briefly."
         config.inference.max_new_tokens = 128
 
-        from vivqa.data.prepare import prepare
-
-        prepare(config, records=[{"id": 0, "description": "x", "conversations": [
-            {"role": "user", "content": "Q"}, {"role": "assistant", "content": "A"}]}])
+        write_samples(config, [{"id": 0, "description": "x", "question": "Q", "answer": "A"}])
 
         result = evaluate(FakeModel(), config, split="train")
-        assert result["system_prompt"] == "Trả lời ngắn gọn."
+        assert result["system_prompt"] == "Answer briefly."
         assert result["max_new_tokens"] == 128
 
     def test_style_prompt_reaches_the_model(self, tmp_path):
         config = Config()
         config.data.data_dir = str(tmp_path)
         config.data.image_folder = str(tmp_path / "images")
-        config.inference.system_prompt = "Một câu duy nhất."
+        config.inference.system_prompt = "One sentence only."
 
-        from vivqa.data.prepare import prepare
-
-        prepare(config, records=[{"id": 0, "description": "x", "conversations": [
-            {"role": "user", "content": "Q"}, {"role": "assistant", "content": "A"}]}])
+        write_samples(config, [{"id": 0, "description": "x", "question": "Q", "answer": "A"}])
 
         model = FakeModel()
         evaluate(model, config, split="train")

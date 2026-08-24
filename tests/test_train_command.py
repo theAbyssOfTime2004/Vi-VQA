@@ -4,8 +4,8 @@ import os
 
 import pytest
 
-from vivqa.config import Config
-from vivqa.train.command import (
+from fvqa.config import Config
+from fvqa.train.command import (
     TRAIN_ENTRYPOINT,
     build_train_command,
     latest_checkpoint,

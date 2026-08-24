@@ -1,4 +1,4 @@
-"""Typed configuration for Vi-VQA.
+"""Typed configuration for FVQA.
 
 `config/config.yaml` is the only place hyperparameters live. Every entry
 point — the CLI, the local training script and the Modal pipeline — goes
@@ -27,7 +27,6 @@ __all__ = [
     "ConfigError",
     "DataConfig",
     "EvaluationConfig",
-    "FvqaConfig",
     "GroundingConfig",
     "InferenceConfig",
     "LoraConfig",
@@ -82,13 +81,10 @@ class GroundingConfig:
     max_chars: int = 1200
 
     # Used in 'prefix' mode: context and question folded into one user turn.
-    template: str = (
-        "Thông tin tham khảo về bức ảnh:\n{description}\n\n"
-        "Dựa vào ảnh và thông tin trên, hãy trả lời: {question}"
-    )
+    template: str = "Fact: {description}\n\nUsing the fact above, answer: {question}"
     # Used in 'system' mode: context only. The question stays in the user
     # turn, so this template must not repeat it.
-    system_template: str = "Thông tin tham khảo về bức ảnh:\n{description}"
+    system_template: str = "Fact: {description}"
 
     VALID_MODES = ("prefix", "system")
 
@@ -117,64 +113,33 @@ class GroundingConfig:
 
 
 @dataclass
-class FvqaConfig:
+class DataConfig:
     """Where the local FVQA release lives, and how to traverse its graph.
 
     FVQA has to be downloaded and extracted by hand (no `datasets.load_dataset`
     support): https://www.dropbox.com/s/iyz6l7jhbt6jb7q/new_dataset_release.zip?dl=1
     `root` should point at the directory that zip extracts into, containing
-    `Name_Lists/` and `new_dataset_release/`.
+    `Name_Lists/` and `new_dataset_release/`. `image_folder` defaults to
+    where images live inside that layout — override both together if you
+    extract to a different `root`.
     """
 
+    data_dir: str = "./data"
     root: str = "./data/fvqa"
+    image_folder: str = "./data/fvqa/new_dataset_release/images"
     fold: int = 0  # FVQA ships 5 official train/test folds, numbered 0-4
     max_hops: int = 2  # graph traversal depth for the retrieval experiment
+
+    splits: SplitConfig = field(default_factory=SplitConfig)
+    grounding: GroundingConfig = field(default_factory=GroundingConfig)
 
     def validate(self, path: str) -> None:
         if not 0 <= self.fold <= 4:
             raise ConfigError(f"{path}.fold must be in [0, 4], got {self.fold}")
         if self.max_hops < 1:
             raise ConfigError(f"{path}.max_hops must be positive, got {self.max_hops}")
-
-
-@dataclass
-class DataConfig:
-    dataset_name: str = "5CD-AI/Viet-ViTextVQA-gemini-VQA"
-    data_dir: str = "./data"
-    image_folder: str = "./data/images"
-    image_quality: int = 95
-
-    # "huggingface" (default) loads dataset_name via datasets.load_dataset.
-    # "fvqa" loads a local FVQA release instead — see FvqaConfig. Nothing
-    # else in this section (dataset_name, streaming, image_quality) applies
-    # in that mode.
-    source: str = "huggingface"
-    fvqa: FvqaConfig = field(default_factory=FvqaConfig)
-
-    # Stream records instead of downloading the whole split first. Pair it
-    # with `vivqa prepare --limit N` to pull only the first N records —
-    # the difference between a few hundred MB and several GB on a Colab or
-    # Kaggle disk. Without a limit, streaming still walks the entire split
-    # and only saves the up-front download.
-    streaming: bool = False
-
-    splits: SplitConfig = field(default_factory=SplitConfig)
-    grounding: GroundingConfig = field(default_factory=GroundingConfig)
-
-    VALID_SOURCES = ("huggingface", "fvqa")
-
-    def validate(self, path: str) -> None:
-        if self.source not in self.VALID_SOURCES:
-            raise ConfigError(
-                f"{path}.source must be one of {self.VALID_SOURCES}, got {self.source!r}"
-            )
-        if not 1 <= self.image_quality <= 100:
-            raise ConfigError(
-                f"{path}.image_quality must be in [1, 100], got {self.image_quality}"
-            )
         self.splits.validate(f"{path}.splits")
         self.grounding.validate(f"{path}.grounding")
-        self.fvqa.validate(f"{path}.fvqa")
 
     def split_file(self, split: str) -> str:
         """Path of the JSON file holding a given split."""
@@ -249,7 +214,7 @@ class ModelConfig:
 
 @dataclass
 class TrainingConfig:
-    output_dir: str = "./checkpoints/qwen3vl-vivqa"
+    output_dir: str = "./checkpoints/qwen3vl-fvqa"
     num_train_epochs: int = 2
     per_device_train_batch_size: int = 1
     per_device_eval_batch_size: int = 1
@@ -348,7 +313,7 @@ class EvaluationConfig:
                 f"{path}.num_samples must be positive or -1 (all), got {self.num_samples}"
             )
         # Imported lazily to keep the dependency direction one-way.
-        from vivqa.evaluation.metrics import AVAILABLE_METRICS
+        from fvqa.evaluation.metrics import AVAILABLE_METRICS
 
         unknown = [m for m in self.metrics if m not in AVAILABLE_METRICS]
         if unknown:
@@ -360,7 +325,7 @@ class EvaluationConfig:
 
 @dataclass
 class Config:
-    project_name: str = "Vi-VQA"
+    project_name: str = "FVQA"
     seed: int = 42
     data: DataConfig = field(default_factory=DataConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
@@ -476,13 +441,13 @@ def _build(cls: type, mapping: Any, path: str) -> Any:
 
 
 def default_config_path() -> Path:
-    """Locate `config/config.yaml`, honouring $VIVQA_CONFIG.
+    """Locate `config/config.yaml`, honouring $FVQA_CONFIG.
 
-    Searched, in order: $VIVQA_CONFIG, ./config/config.yaml, then the
+    Searched, in order: $FVQA_CONFIG, ./config/config.yaml, then the
     repository root inferred from this file's location — so the CLI works
     from a subdirectory and from an installed package alike.
     """
-    env = os.environ.get("VIVQA_CONFIG")
+    env = os.environ.get("FVQA_CONFIG")
     if env:
         return Path(env)
 

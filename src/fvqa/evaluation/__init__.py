@@ -1,6 +1,6 @@
 """Evaluation: text metrics and the prediction runner."""
 
-from vivqa.evaluation.metrics import (
+from fvqa.evaluation.metrics import (
     AVAILABLE_METRICS,
     compute_metrics,
     normalize_text,

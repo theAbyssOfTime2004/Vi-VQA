@@ -1,8 +1,8 @@
 """Generative VQA metrics.
 
-Exact match alone is close to useless here: answers average ~49 characters
-of free-form Vietnamese, so a correct answer phrased differently scores
-zero. These metrics grade partial credit instead.
+Exact match alone is a weak signal for free-form answers: a correct
+answer phrased differently scores zero. These metrics grade partial
+credit instead.
 
 Everything is implemented in the standard library. `nltk` and
 `rouge-score` would each pull a download step or a heavyweight dependency
@@ -41,12 +41,13 @@ _WHITESPACE = re.compile(r"\s+")
 
 
 def normalize_text(text: str) -> str:
-    """Normalize a Vietnamese answer for comparison.
+    """Normalize an answer for comparison.
 
-    NFC normalization is not cosmetic: "à" can be stored either as one
-    codepoint or as "a" plus a combining grave accent. The two render
-    identically, compare unequal, and the dataset contains both — without
-    this step exact match silently under-reports.
+    NFC normalization is not cosmetic: many Unicode characters (accented
+    Latin letters, for instance) can be stored either as one composed
+    codepoint or as a base letter plus a combining mark. The two render
+    identically but compare unequal — without this step exact match can
+    silently under-report on any input that mixes both forms.
     """
     text = unicodedata.normalize("NFC", text)
     text = text.lower().strip()
@@ -57,9 +58,9 @@ def normalize_text(text: str) -> str:
 def tokenize(text: str) -> list[str]:
     """Whitespace tokens of the normalized text.
 
-    Vietnamese is written with spaces between *syllables*, not words, so
-    these are syllable tokens. That is what every ViTextVQA-style
-    benchmark scores on, and it keeps the metric tokenizer-free.
+    Deliberately tokenizer-free: FVQA's answers are short factual phrases
+    ("trumpet", "a jazz club"), and whitespace splitting on normalized
+    text is enough to score them without pulling in a real tokenizer.
     """
     normalized = normalize_text(text)
     return normalized.split() if normalized else []

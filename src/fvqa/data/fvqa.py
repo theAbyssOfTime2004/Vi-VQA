@@ -2,10 +2,10 @@
 
 FVQA ships a real knowledge graph: 225,434 triples from DBpedia, ConceptNet
 and WebChild, and 5,826 questions each anchored to exactly one supporting
-fact. Unlike Viet-ViTextVQA, the "knowledge" here is not free text — it is
+fact. The knowledge here is not free text — it is
 `(e1, relation, e2)` triples you can build a graph from and traverse.
 `data/fvqa_graph.py` does the traversal; this module only gets the raw
-release into the shape the rest of `vivqa` expects.
+release into the shape the rest of `fvqa` expects.
 
 Schema notes below come from downloading the release and inspecting it
 directly (2026-08-24), not from the README, which understates two counts
@@ -36,9 +36,9 @@ import logging
 import os
 from typing import Any, Iterable, Mapping
 
-from vivqa.config import Config, FvqaConfig, SplitConfig
-from vivqa.data.grounding import apply_grounding
-from vivqa.data.prepare import IMAGE_TOKEN, assign_splits, write_split
+from fvqa.config import Config, SplitConfig
+from fvqa.data.grounding import apply_grounding
+from fvqa.data.samples import IMAGE_TOKEN, assign_splits, write_split
 
 __all__ = [
     "FACTS_FILENAME",
@@ -108,10 +108,9 @@ def build_sample(
     question_id: str,
     question_record: Mapping[str, Any],
     facts: Mapping[str, dict[str, Any]],
-    config: FvqaConfig,
     grounding_config: Any,
 ) -> dict[str, Any]:
-    """Build one training sample in the format the rest of vivqa expects.
+    """Build one training sample in the format the rest of fvqa expects.
 
     `fact` is a list with exactly one element for every question in the
     release (verified: 5,826/5,826), so `facts[0]` is safe without a
@@ -169,7 +168,7 @@ def prepare_fvqa(
 ) -> dict[str, int]:
     """Build train/val/test JSON files from a local FVQA release.
 
-    Unlike `data.prepare.prepare`, this never downloads or re-encodes
+    Unlike a HuggingFace-dataset loader, this never downloads or re-encodes
     images: FVQA ships ready-to-use JPEGs, so samples just reference the
     existing filenames.
 
@@ -181,22 +180,22 @@ def prepare_fvqa(
     `data.splits.train`/`val` to ignore `.test` (FVQA already fixed that).
 
     Args:
-        config: Loaded configuration. `config.data.fvqa` selects the root
-            directory and fold.
+        config: Loaded configuration. `config.data.root`/`config.data.fold`
+            select which local release and which official fold to read.
         limit: Process at most this many questions. For smoke tests.
 
     Returns:
         Sample counts per split, plus `questions` (total processed).
     """
-    fvqa = config.data.fvqa
-    facts = load_facts(fvqa.root)
-    questions = load_questions(fvqa.root)
-    train_images = load_split_images(fvqa.root, fvqa.fold, "train")
-    test_images = load_split_images(fvqa.root, fvqa.fold, "test")
+    data = config.data
+    facts = load_facts(data.root)
+    questions = load_questions(data.root)
+    train_images = load_split_images(data.root, data.fold, "train")
+    test_images = load_split_images(data.root, data.fold, "test")
 
     logger.info(
         "FVQA fold %d: %d facts, %d questions, %d train images, %d test images",
-        fvqa.fold, len(facts), len(questions), len(train_images), len(test_images),
+        data.fold, len(facts), len(questions), len(train_images), len(test_images),
     )
 
     items: Iterable[tuple[str, dict[str, Any]]] = questions.items()
@@ -214,7 +213,7 @@ def prepare_fvqa(
             logger.warning("question %s references an unknown-split image %s", question_id, image)
             continue
 
-        sample = build_sample(question_id, record, facts, fvqa, config.data.grounding)
+        sample = build_sample(question_id, record, facts, config.data.grounding)
         if image in test_images:
             by_split["test"].append(sample)
         else:

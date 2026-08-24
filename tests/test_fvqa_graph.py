@@ -13,7 +13,7 @@ triple count and calls `fact` a single ID when it is actually a list).
 
 import pytest
 
-from vivqa.data.fvqa_graph import KnowledgeGraph, Triple
+from fvqa.data.fvqa_graph import KnowledgeGraph, Triple
 
 
 def fact(e1, e2, e1_label=None, e2_label=None, kb="conceptnet", surface=None):

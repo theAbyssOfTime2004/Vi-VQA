@@ -19,8 +19,8 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from vivqa.config import Config
-from vivqa.data.grounding import apply_grounding
+from fvqa.config import Config
+from fvqa.data.grounding import apply_grounding
 
 __all__ = ["VQAModel", "load_model", "resolve_model_class"]
 
@@ -39,7 +39,7 @@ def resolve_model_class() -> Any:
     except ImportError as error:  # pragma: no cover - depends on environment
         raise ImportError(
             "transformers is required to load the model. "
-            "Install it with: pip install 'vivqa[infer]'"
+            "Install it with: pip install 'fvqa[infer]'"
         ) from error
 
     model_class = getattr(transformers, "Qwen3VLForConditionalGeneration", None)

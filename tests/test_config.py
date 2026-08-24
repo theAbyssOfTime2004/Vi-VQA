@@ -3,7 +3,7 @@
 import pytest
 import yaml
 
-from vivqa.config import Config, ConfigError, GroundingConfig, load_config
+from fvqa.config import Config, ConfigError, GroundingConfig, load_config
 
 
 def write_config(tmp_path, mapping):

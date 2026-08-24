@@ -1,7 +1,7 @@
 """Knowledge grounding from the dataset's description field."""
 
-from vivqa.config import GroundingConfig
-from vivqa.data.grounding import apply_grounding, truncate_description
+from fvqa.config import GroundingConfig
+from fvqa.data.grounding import apply_grounding, truncate_description
 
 DESCRIPTION = (
     "Chợ Bến Thành nằm ở quận 1. Chợ được xây năm 1912. "

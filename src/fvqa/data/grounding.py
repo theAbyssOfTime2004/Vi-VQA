@@ -1,22 +1,20 @@
-"""Knowledge grounding from the dataset's own `description` field.
+"""Fold a piece of context text into a question, for grounded prompts.
 
-Each record in Viet-ViTextVQA-gemini-VQA carries a ~558-character
-description of the image alongside the QA turns. Gemini wrote the answers
-*from that description*, so the answers routinely assert facts that are
-not legible in the pixels — the year a temple was built, which district a
-market is in. Training on (image, question) alone asks the model to
-recall knowledge it was never shown; feeding the description back turns
-the same sample into a reading-comprehension task it can actually learn.
-
-The description is knowledge the dataset already paid for, and until now
-no code path in this repository touched it.
+Generic on its own — it just formats `{description}` and `{question}`
+into a template — but the interesting case in this project is FVQA's
+*oracle fact* grounding: `data/fvqa.py` passes the question's one correct
+supporting fact (its `surface` text, e.g. "trumpets are found in jazz
+clubs") as `description`, which turns "recall this from the image alone"
+into "read this fact and answer". That is a different, easier condition
+than the graph-retrieval path in `fvqa_graph.py`, which does not get to
+see which fact is correct.
 
 Two modes:
     prefix — the description is folded into the user turn. Works with any
              loader, which is why it is the default.
     system — the description becomes a separate `system` turn. Cleaner
              separation, but the training loader must understand a system
-             role; verify before switching (see docs/GROUNDING.md).
+             role; verify before switching.
 """
 
 from __future__ import annotations
@@ -24,7 +22,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from vivqa.config import GroundingConfig
+from fvqa.config import GroundingConfig
 
 __all__ = ["GroundedPrompt", "apply_grounding", "truncate_description"]
 

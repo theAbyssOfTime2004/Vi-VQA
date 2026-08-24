@@ -1,11 +1,10 @@
 """A real knowledge graph over FVQA's 225,434 triples, and traversal on it.
 
-This is the part that does not exist anywhere else in `vivqa`: every other
-grounding path (Vi-VQA's `description`, FVQA's own oracle fact in
-`fvqa.build_sample`) hands the model a piece of text that was chosen for it
-in advance. Here, nothing is chosen in advance — `KnowledgeGraph` builds a
-real node/edge structure from the triples, and `bfs`/`shortest_path` walk
-it themselves.
+This is the part that does not exist anywhere else in `fvqa`: the oracle
+grounding path (`fvqa.build_sample`) hands the model a piece of text that
+was chosen for it in advance — the question's own correct fact. Here,
+nothing is chosen in advance — `KnowledgeGraph` builds a real node/edge
+structure from the triples, and `bfs`/`shortest_path` walk it themselves.
 
 Two distinct experiments this enables, and they answer different
 questions:
