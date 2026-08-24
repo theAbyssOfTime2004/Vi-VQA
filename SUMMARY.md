@@ -105,12 +105,51 @@ với logic parse HuggingFace/Gemini đã bị xoá.
    graph-retrieval như một eval mode.
 3. **Train thật** — cần GPU, chưa chạy (chỉ mới xác nhận dry-run đúng lệnh).
 
-## Hướng tiếp theo
+## Lộ trình 4 milestone
 
-1. Hỏi Qwen3-VL "vật thể/cảnh/hành động chính trong ảnh là gì" → seed cho
-   `find_entities` — tận dụng model đã có trong `model.py`
-2. Nối graph-retrieval vào `evaluation/runner.py` như một điều kiện eval
-   thứ ba (không context / oracle fact / graph retrieval)
-3. Chạy 3 điều kiện so sánh, đo graph traversal đóng góp được bao nhiêu so
-   với biết trước đáp án
-4. Train thật, đối chứng với baseline zero-shot
+Từ đây làm tuần tự, không song song, vì M2 phụ thuộc model loading (M1) và
+M4 phụ thuộc pipeline local chạy đúng: **M1 train/checkpoint chắc chắn →
+M2 graph retrieval (text seed) → M3 vision-seeding → M4 Modal + CI**.
+
+### M1 — PR1: pin trainer revision, CI, fix flag contract (xong)
+
+- `config.trainer.{repo_url,revision}` mới — pin `2U1/Qwen-VL-Series-Finetune`
+  vào đúng commit (`70c7b2f`), không còn track HEAD ngầm. `ensure_trainer_repo`
+  fetch đúng SHA (shallow, fallback full clone nếu server từ chối), cảnh báo
+  (không tự ý checkout đè) nếu thư mục đã có sẵn ở revision khác.
+- `scripts/check_trainer_flags.py` — đối chiếu **mọi** flag mà
+  `build_train_command()` có thể sinh ra với field thật trong
+  `ModelArguments`/`DataArguments`/`TrainingArguments` của trainer (đọc bằng
+  `ast`, không cần cài torch/transformers/trl). Chạy thử ngay lập tức bắt
+  được lỗi thật: **`command.py` gửi `--eval_data_path`, nhưng field thật của
+  trainer là `eval_path`** — mọi lần train có kèm validation split (tức là
+  mặc định, vì `fvqa prepare` luôn ra `val.json`) sẽ chết vài phút sau khi
+  chạy vì `HfArgumentParser` từ chối flag lạ. Đã sửa.
+- `.github/workflows/ci.yml` — CPU-only, Python 3.10-3.12, `pytest` +
+  `compileall` + `fvqa config`, chạy mọi PR.
+- `.github/workflows/integration.yml` — `workflow_dispatch` + weekly, clone
+  trainer đúng revision pin, verify entrypoint/deepspeed config, chạy
+  `check_trainer_flags.py`, tải FVQA thật rồi `fvqa train --dry-run`.
+- 172 test (từ 162), gồm `test_train_runner.py` mới (dùng git repo cục bộ
+  làm "remote" giả, không cần mạng) và case cho `TrainerConfig` trong
+  `test_config.py`.
+
+### Còn lại
+
+**M1** (checkpoint loader): LoRA vs full checkpoint detection, `PeftModel`
+loading, QLoRA semantics đổi sang `tuning_method` enum, GPU smoke train
+(`max_steps`).
+
+**M2**: `src/fvqa/retrieval/` — `GraphRetriever`, lexical fact ranker, di
+chuyển `max_hops` từ `data` sang `retrieval`, nối các eval condition
+(`no-context`/`oracle-fact`/`oracle-seed-graph`), retrieval chạy runtime
+(không bake vào split JSON).
+
+**M3**: `SeedProvider` interface, Qwen3-VL vision-seeding có cache, fallback
+khi `find_entities` không match, nối `vision-seed-graph`.
+
+**M4**: Modal smoke test theo 4 mức (import → prepare → baseline GPU →
+train 2-step GPU), lint (`ruff`) thêm sau CI cơ bản.
+
+Chi tiết đầy đủ từng PR nằm trong lịch sử hội thoại — tài liệu này chỉ ghi
+quyết định và trạng thái đã verify.

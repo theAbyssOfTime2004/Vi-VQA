@@ -33,6 +33,7 @@ __all__ = [
     "ModelConfig",
     "QLoraConfig",
     "SplitConfig",
+    "TrainerConfig",
     "TrainingConfig",
     "default_config_path",
     "load_config",
@@ -213,6 +214,27 @@ class ModelConfig:
 
 
 @dataclass
+class TrainerConfig:
+    """Which commit of the external trainer repo to run against.
+
+    `2U1/Qwen-VL-Series-Finetune` moves independently of this project —
+    an upstream flag rename or restructure can silently break
+    `build_train_command`'s output. Pinning a revision here means "config
+    + code + this commit" is the whole reproducibility story for a run,
+    instead of "whatever HEAD happened to be that day".
+    """
+
+    repo_url: str = "https://github.com/2U1/Qwen-VL-Series-Finetune.git"
+    revision: str = "70c7b2fcb0e276b1fa4b136852e9b862ce8730fa"
+
+    def validate(self, path: str) -> None:
+        if not self.repo_url.strip():
+            raise ConfigError(f"{path}.repo_url must not be empty")
+        if not self.revision.strip():
+            raise ConfigError(f"{path}.revision must not be empty")
+
+
+@dataclass
 class TrainingConfig:
     output_dir: str = "./checkpoints/qwen3vl-fvqa"
     num_train_epochs: int = 2
@@ -329,6 +351,7 @@ class Config:
     seed: int = 42
     data: DataConfig = field(default_factory=DataConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
+    trainer: TrainerConfig = field(default_factory=TrainerConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     inference: InferenceConfig = field(default_factory=InferenceConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
@@ -336,6 +359,7 @@ class Config:
     def validate(self) -> None:
         self.data.validate("data")
         self.model.validate("model")
+        self.trainer.validate("trainer")
         self.training.validate("training")
         self.inference.validate("inference")
         self.evaluation.validate("evaluation")

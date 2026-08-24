@@ -28,6 +28,14 @@ def test_defaults_apply_to_missing_sections(tmp_path):
     assert config.model.lora.rank == 128
 
 
+def test_trainer_revision_defaults_to_a_real_pinned_commit():
+    # A run's reproducibility depends on this never silently tracking
+    # HEAD — the default must be an actual commit SHA, not a branch name.
+    config = Config()
+    assert len(config.trainer.revision) == 40
+    assert all(c in "0123456789abcdef" for c in config.trainer.revision)
+
+
 def test_unknown_key_is_rejected(tmp_path):
     # A typo must fail loudly rather than be silently ignored, which is how
     # a run finishes with a hyperparameter the config never applied.
@@ -56,6 +64,8 @@ def test_missing_file_is_reported(tmp_path):
             "nothing would train",
         ),
         ({"model": {"lora": {"enabled": True}, "qlora": {"enabled": True}}}, "not both"),
+        ({"trainer": {"revision": ""}}, "revision must not be empty"),
+        ({"trainer": {"repo_url": ""}}, "repo_url must not be empty"),
     ],
 )
 def test_invalid_values_are_rejected(tmp_path, mapping, message):

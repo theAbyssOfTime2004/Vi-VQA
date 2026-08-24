@@ -155,7 +155,13 @@ def build_train_command(
     # the trainer fail several minutes in.
     if val_path:
         command += [
-            "--eval_data_path", val_path,
+            # The trainer's DataArguments field is `eval_path`, not
+            # `eval_data_path` — verified against
+            # `2U1/Qwen-VL-Series-Finetune`'s src/params.py. Passing the
+            # wrong flag name here used to fail every run that included a
+            # validation split, since HfArgumentParser rejects unknown
+            # flags outright.
+            "--eval_path", val_path,
             "--eval_strategy", training.eval_strategy,
             "--eval_steps", str(training.eval_steps),
             "--load_best_model_at_end", _flag(training.load_best_model_at_end),

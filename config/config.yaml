@@ -67,6 +67,15 @@ model:
     bnb_4bit_quant_type: "nf4"
     bnb_4bit_use_double_quant: true
 
+# The external trainer (2U1/Qwen-VL-Series-Finetune) moves independently
+# of this project. Pinning a revision here is what makes "config + code"
+# reproducible instead of "config + code + whatever HEAD was that day" —
+# see src/fvqa/train/command.py for the contract this commit is checked
+# against.
+trainer:
+  repo_url: "https://github.com/2U1/Qwen-VL-Series-Finetune.git"
+  revision: "70c7b2fcb0e276b1fa4b136852e9b862ce8730fa"
+
 training:
   output_dir: "./checkpoints/qwen3vl-fvqa"
   num_train_epochs: 2

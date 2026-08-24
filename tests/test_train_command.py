@@ -101,7 +101,7 @@ class TestConfigIsHonoured:
 
 class TestEvaluationWiring:
     def test_validation_path_enables_evaluation(self, command):
-        assert value_after(command, "--eval_data_path") == "/data/val.json"
+        assert value_after(command, "--eval_path") == "/data/val.json"
         assert value_after(command, "--eval_strategy") == "steps"
 
     def test_evaluation_is_off_without_a_validation_file(self):
@@ -110,7 +110,7 @@ class TestEvaluationWiring:
             Config(), train_path="/t.json", image_folder="/i", output_dir="/o"
         )
         assert value_after(command, "--eval_strategy") == "no"
-        assert "--eval_data_path" not in command
+        assert "--eval_path" not in command
         assert "--load_best_model_at_end" not in command
 
 
