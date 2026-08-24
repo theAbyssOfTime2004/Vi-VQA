@@ -32,6 +32,7 @@ __all__ = [
     "LoraConfig",
     "ModelConfig",
     "QuantizationConfig",
+    "RetrievalConfig",
     "SplitConfig",
     "TrainerConfig",
     "TrainingConfig",
@@ -114,6 +115,66 @@ class GroundingConfig:
 
 
 @dataclass
+class RetrievalConfig:
+    """Graph retrieval: how far to walk, and how much to keep.
+
+    Separate from `data` on purpose. `max_hops` used to live there, but
+    it describes the retrieval algorithm, not the dataset — FVQA's graph
+    is the same graph whether you walk one hop or three. Anything that
+    changes a score without changing the data belongs here, and gets
+    written into the result file so two runs are distinguishable.
+    """
+
+    enabled: bool = False
+    max_hops: int = 2
+    #: Cap on graph nodes the seed guesses resolve to.
+    max_seed_entities: int = 5
+    #: Cap on facts the traversal collects before ranking. A
+    #: well-connected seed reaches a large slice of the graph well before
+    #: max_hops runs out. 300 is measured, not guessed: on 981 real
+    #: questions with an oracle seed at 1 hop, recall@5 of the supporting
+    #: fact runs 58.0% at cap 50, 59.4% at 100, 61.1% at 300, 62.7% at
+    #: 5000 — and 300 costs 1.6 ms/question, which is nothing beside a
+    #: single VLM generate call.
+    max_candidate_facts: int = 300
+    #: How many ranked facts go into the prompt.
+    top_k_facts: int = 5
+    ranking_method: str = "lexical"
+
+    VALID_RANKING_METHODS = ("lexical",)
+
+    def validate(self, path: str) -> None:
+        if self.max_hops < 1:
+            raise ConfigError(f"{path}.max_hops must be positive, got {self.max_hops}")
+        for name in ("max_seed_entities", "max_candidate_facts", "top_k_facts"):
+            value = getattr(self, name)
+            if value < 1:
+                raise ConfigError(f"{path}.{name} must be positive, got {value}")
+        if self.top_k_facts > self.max_candidate_facts:
+            raise ConfigError(
+                f"{path}.top_k_facts ({self.top_k_facts}) cannot exceed "
+                f"max_candidate_facts ({self.max_candidate_facts}): ranking cannot "
+                "return more facts than the traversal collected"
+            )
+        if self.ranking_method not in self.VALID_RANKING_METHODS:
+            raise ConfigError(
+                f"{path}.ranking_method must be one of {self.VALID_RANKING_METHODS}, "
+                f"got {self.ranking_method!r}"
+            )
+
+    def as_dict(self) -> dict[str, Any]:
+        """The provenance block written into a result file."""
+        return {
+            "enabled": self.enabled,
+            "max_hops": self.max_hops,
+            "max_seed_entities": self.max_seed_entities,
+            "max_candidate_facts": self.max_candidate_facts,
+            "top_k_facts": self.top_k_facts,
+            "ranking_method": self.ranking_method,
+        }
+
+
+@dataclass
 class DataConfig:
     """Where the local FVQA release lives, and how to traverse its graph.
 
@@ -129,7 +190,6 @@ class DataConfig:
     root: str = "./data/fvqa"
     image_folder: str = "./data/fvqa/new_dataset_release/images"
     fold: int = 0  # FVQA ships 5 official train/test folds, numbered 0-4
-    max_hops: int = 2  # graph traversal depth for the retrieval experiment
 
     splits: SplitConfig = field(default_factory=SplitConfig)
     grounding: GroundingConfig = field(default_factory=GroundingConfig)
@@ -137,8 +197,6 @@ class DataConfig:
     def validate(self, path: str) -> None:
         if not 0 <= self.fold <= 4:
             raise ConfigError(f"{path}.fold must be in [0, 4], got {self.fold}")
-        if self.max_hops < 1:
-            raise ConfigError(f"{path}.max_hops must be positive, got {self.max_hops}")
         self.splits.validate(f"{path}.splits")
         self.grounding.validate(f"{path}.grounding")
 
@@ -389,6 +447,7 @@ class Config:
     project_name: str = "FVQA"
     seed: int = 42
     data: DataConfig = field(default_factory=DataConfig)
+    retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     trainer: TrainerConfig = field(default_factory=TrainerConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
@@ -397,6 +456,7 @@ class Config:
 
     def validate(self) -> None:
         self.data.validate("data")
+        self.retrieval.validate("retrieval")
         self.model.validate("model")
         self.trainer.validate("trainer")
         self.training.validate("training")

@@ -178,12 +178,33 @@ class KnowledgeGraph:
             Triples in BFS order, each appearing once even if reachable
             through multiple paths.
         """
+        return [triple for triple, _hop in self.bfs_with_hops(
+            start_entities, max_hops, max_facts=max_facts
+        )]
+
+    def bfs_with_hops(
+        self,
+        start_entities: Sequence[str],
+        max_hops: int,
+        *,
+        max_facts: int | None = None,
+    ) -> list[tuple[Triple, int]]:
+        """`bfs`, but each fact paired with how far out it was found.
+
+        A fact touching a seed directly is hop 1. Retrieval ranking needs
+        this: "how far from what we recognised in the image" is evidence
+        about relevance that BFS order alone loses as soon as anything
+        re-sorts the list.
+
+        Returns:
+            `(triple, hop)` pairs in BFS order, each fact once.
+        """
         if max_hops < 1:
             raise ValueError(f"max_hops must be at least 1, got {max_hops}")
 
         visited_entities: set[str] = set()
         visited_facts: set[str] = set()
-        result: list[Triple] = []
+        result: list[tuple[Triple, int]] = []
 
         queue: deque[tuple[str, int]] = deque()
         for entity in start_entities:
@@ -198,7 +219,7 @@ class KnowledgeGraph:
             for triple in self.neighbors(entity):
                 if triple.fact_id not in visited_facts:
                     visited_facts.add(triple.fact_id)
-                    result.append(triple)
+                    result.append((triple, depth + 1))
                     if max_facts is not None and len(result) >= max_facts:
                         return result
                 neighbor = triple.other(entity)

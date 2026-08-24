@@ -134,16 +134,88 @@ M2 graph retrieval (text seed) → M3 vision-seeding → M4 Modal + CI**.
   làm "remote" giả, không cần mạng) và case cho `TrainerConfig` trong
   `test_config.py`.
 
+### M1 — PR2: checkpoint loader (xong)
+
+`model.py` luôn gọi `from_pretrained` cho mọi `--model-path`. Đúng với
+model id và full-weights checkpoint, **sai với đúng thứ trainer thật sự
+ghi ra khi bật LoRA**: thư mục adapter chỉ chứa delta, không có base
+weight để cộng vào.
+
+`src/fvqa/checkpoint.py` mới phân loại `hf_id` / `full` / `peft`. Hai chi
+tiết đọc được từ code trainer thật, không phải từ giả định:
+
+1. **LoRA checkpoint của trainer này cũng có `config.json`** (ghi bởi
+   `model.config.save_pretrained` cạnh adapter) → phải check
+   `adapter_config.json` **trước**, nếu không adapter bị route nhầm sang
+   nhánh full-weights.
+2. **`non_lora_state_dict.bin` chứa weight đã train nhưng không nằm trong
+   adapter** — mọi param `requires_grad` không phải LoRA tensor. Với config
+   hiện tại (`freeze_merger: false`) đó là vision-language merger. Chỉ load
+   `adapter_model.safetensors` sẽ **giữ nguyên merger chưa train và không
+   báo lỗi gì cả**: model chạy bình thường, chỉ là điểm thấp hơn run đã tạo
+   ra nó. Giờ load vào base model trước khi PEFT bọc, dùng đúng logic strip
+   prefix của trainer, và key không khớp thì raise thay vì bị `strict=False`
+   nuốt mất.
+
+### M1 — PR3: `tuning_method` enum (xong)
+
+Hai boolean `lora.enabled` / `qlora.enabled` mô tả 4 trạng thái mà chỉ 3
+có nghĩa — và config **cấm đúng cái thật sự là QLoRA** (cả hai true), nên
+cách duy nhất để xin QLoRA là `lora=false, qlora=true`, sinh ra
+`--lora_enable False --bits 4`: base 4-bit, **không gắn gì trainable lên
+đó**. Run không train gì và không báo gì.
+
+`model.tuning_method: full | lora | qlora` thay cả hai. QLoRA giờ emit cả
+`--lora_enable True` lẫn `--bits 4`.
+
+`model.qlora` → `model.quantization`, chỉ giữ hai field trainer thật sự
+nhận (`--quant_type`, `--double_quant`). Bỏ `bnb_4bit_compute_dtype`:
+trainer tự suy từ `training.bf16/fp16`, không có flag nào để forward.
+
+Thêm `training.max_steps` + `scripts/smoke_gpu.sh` — 2 optimizer step rồi
+reload lại adapter vừa ghi, phủ được: model load, decode ảnh, forward,
+backward, ghi checkpoint, reload adapter, generate.
+
+### M2 — PR4: retrieval core (xong)
+
+`src/fvqa/retrieval/`: `GraphRetriever`, `LexicalRanker`, `RetrievedFact`/
+`EntityCandidate`/`RetrievalResult`, `format_facts`.
+
+Luồng: `seed text → find_entities → bfs_with_hops → rank(question) → top-k`.
+Nhận **seed dạng text, không nhận ảnh** — để test được retrieval độc lập
+với chất lượng vision-seeding. Điểm kém end-to-end có hai nguyên nhân khả
+dĩ (graph đi sai chỗ / model nhìn sai vật), tách ra mới quy trách nhiệm được.
+
+`max_hops` chuyển từ `data` sang section `retrieval` mới — nó là tham số
+thuật toán, không phải thuộc tính dataset. Toàn bộ setting được ghi vào
+`RetrievalResult.settings` để hai run khác hop không lẫn vào nhau.
+
+**Đo thật trên 225.434 triple + 981 câu hỏi thật** (oracle seed = entity
+của supporting fact *không phải* đáp án — seed bằng đáp án thì không đo gì
+cả), 1 hop:
+
+| | recall@1 | recall@5 | recall@10 |
+|---|---|---|---|
+| lexical ranker | 37,9% | 59,4% | 66,3% |
+
+Đây là **cận trên của nhánh graph-retrieval khi seed đã đúng**: vision-seeding
+chỉ có thể tệ hơn con số này. Nếu oracle-fact đạt X% thì phần mất do
+traversal+ranking đã đo được ngay từ bây giờ, chưa cần GPU.
+
+Đo luôn để chọn default thay vì đoán: `max_candidate_facts` 50/100/300/5000
+cho recall@5 58,0% / 59,4% / 61,1% / 62,7%; cap 300 tốn 1,6 ms/câu — không
+đáng kể so với một lần generate của VLM → default 300.
+
+Hạn chế đã ghi nhận, không giấu: câu hỏi kiểu "What can a dog do?" sau khi
+bỏ stopword chỉ còn đúng seed, mọi fact của `dog` điểm bằng nhau, tie-break
+theo fact id — deterministic nhưng vô nghĩa. Đây chính là chỗ embedding
+hoặc LLM reranker sẽ ăn điểm.
+
 ### Còn lại
 
-**M1** (checkpoint loader): LoRA vs full checkpoint detection, `PeftModel`
-loading, QLoRA semantics đổi sang `tuning_method` enum, GPU smoke train
-(`max_steps`).
-
-**M2**: `src/fvqa/retrieval/` — `GraphRetriever`, lexical fact ranker, di
-chuyển `max_hops` từ `data` sang `retrieval`, nối các eval condition
-(`no-context`/`oracle-fact`/`oracle-seed-graph`), retrieval chạy runtime
-(không bake vào split JSON).
+**M2**: nối retrieval vào `evaluation/runner.py` thành eval condition
+(`no-context` / `oracle-fact` / `oracle-seed-graph`), retrieval chạy lúc
+eval chứ không bake vào split JSON.
 
 **M3**: `SeedProvider` interface, Qwen3-VL vision-seeding có cache, fallback
 khi `find_entities` không match, nối `vision-seed-graph`.

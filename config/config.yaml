@@ -18,7 +18,6 @@ data:
   root: "./data/fvqa"                              # directory the zip extracts into
   image_folder: "./data/fvqa/new_dataset_release/images"  # override together with root
   fold: 0                                           # FVQA ships 5 official train/test folds (0-4)
-  max_hops: 2                                       # graph traversal depth for the retrieval experiment
 
   # Fractions must sum to 1.0. FVQA's own test fold is kept intact (so
   # scores stay comparable to the paper); only train/val are carved with
@@ -42,6 +41,27 @@ data:
     template: "Fact: {description}\n\nUsing the fact above, answer: {question}"
     # 'system' mode: fact only, question stays in the user turn.
     system_template: "Fact: {description}"
+
+# Graph retrieval: the model has to *find* the supporting fact by walking
+# the knowledge graph from a guessed starting entity, instead of being
+# handed it. Separate from data.grounding above, which is the oracle
+# condition — the gap between the two scores is what the graph is worth.
+#
+# These are algorithm parameters, not dataset properties (max_hops used to
+# sit under `data`, which was the wrong place), and they are recorded in
+# every result file: a score from hop 1 and a score from hop 3 are
+# otherwise indistinguishable after the fact.
+retrieval:
+  enabled: false
+  max_hops: 2
+  max_seed_entities: 5        # graph nodes the seed guesses may resolve to
+  # Traversal cap, applied before ranking. Measured on 981 real questions
+  # (oracle seed, 1 hop): recall@5 of the supporting fact is 59.4% at 100,
+  # 61.1% at 300, 62.7% at 5000. 300 costs 1.6 ms/question — free next to
+  # one VLM generate call — so it is the default rather than 100.
+  max_candidate_facts: 300
+  top_k_facts: 5              # ranked facts that reach the prompt
+  ranking_method: "lexical"   # deterministic, no extra model, easy to beat
 
 model:
   model_id: "Qwen/Qwen3-VL-8B-Instruct"
