@@ -271,6 +271,60 @@ ra một entity *hàng xóm* của entity đúng chứ không phải entity đú
 vẫn để 2 vì đó mới là pipeline thật sự nhắm tới — nhưng ghi rõ ở đây để
 sau này không ai đọc nhầm "tăng hop vô dụng" thành kết luận về dataset.
 
+### M3 — PR6: vision-seeding (xong)
+
+`src/fvqa/retrieval/seeds.py`: `SeedProvider` protocol,
+`ManualSeedProvider`, `QwenVisionSeedProvider`, `SeedCache`.
+
+**Guardrail quan trọng nhất:** interface chỉ nhận `(image_path, question)`.
+Không phải thiếu sót — nếu seed provider nhìn được supporting fact hay đáp
+án thì nó có thể trả về chính đáp án dưới dạng "đoán", và điều kiện
+vision-seed sẽ đạt điểm cao trong khi **không đo gì cả**. Chặn bằng cấu
+trúc đáng giá hơn là tự nhắc mình đừng dùng.
+
+(Oracle seed *không* phải một `SeedProvider` — nó suy từ supporting fact
+chứ không từ ảnh, nên để nguyên trong `conditions.py` nơi phép suy đó nhìn
+thấy được. Gói nó thành SeedProvider sẽ che mất việc nó không hề nhìn ảnh.)
+
+Parse phản hồi model chịu được thực tế: JSON trong code fence, có preamble,
+JSON hỏng → fallback tách dòng. Mất hẳn seed list biến thành retrieval
+failure trông như lỗi graph, nên khôi phục tạm bợ vẫn hơn không khôi phục.
+
+`SeedCache` khoá theo `(model, image, question)` — seed không phụ thuộc gì
+ở hạ nguồn, nên mọi thí nghiệm đổi hop/ranker/top-k lẽ ra phải chạy lại VLM
+trên cả split để ra đúng kết quả cũ.
+
+**Fallback ladder, đo trước khi giữ:** `seed_variants()` thử lần lượt dạng
+chuẩn hoá → số ít → head noun → head noun số ít. Mô phỏng cách VLM thật
+phát âm entity (thêm article, số nhiều, viết hoa) trên 3.200 cách diễn đạt
+từ dữ liệu thật:
+
+| | tỉ lệ resolve được |
+|---|---|
+| chỉ normalize (code cũ) | 86,6% |
+| full ladder | **99,8%** |
+
+`singularize()` cố tình thô sơ, không kéo thư viện morphology về cho một
+luật: đoán sai chỉ tốn một lần thử không ra gì, không bao giờ ra đáp án sai.
+
+**Chuỗi đo hoàn chỉnh** (152 câu val thật, stub VLM đoán rộng rãi — model
+thật sẽ tệ hơn):
+
+| condition | supporting fact vào được prompt |
+|---|---|
+| `oracle-fact` | 100% (theo định nghĩa) |
+| `oracle-seed-graph` | 50,7% |
+| `vision-seed-graph` | 25,7% |
+
+```
+100   − 50,7 = 49,3pp   mất do traversal + ranking
+50,7  − 25,7 = 25,0pp   mất do vision-seeding
+```
+
+Đây là **cận trên** của phần grounding đóng góp được ở mỗi tầng — model
+không dùng được fact mà retrieval chưa từng đưa cho nó. Cột metric trong
+lần chạy này vô nghĩa (stub luôn trả "trumpet"); cột recall mới là kết quả.
+
 ### Còn lại
 
 **M3**: `SeedProvider` interface, Qwen3-VL vision-seeding có cache, fallback

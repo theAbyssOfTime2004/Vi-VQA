@@ -114,7 +114,11 @@ def evaluate(
     split = split or settings.split
     num_samples = settings.num_samples if num_samples is None else num_samples
 
-    condition_context = ConditionContext(config=config, condition=condition)
+    # The model is handed to the context because `vision-seed-graph` has
+    # to ask it what it can see before the question is even posed.
+    condition_context = ConditionContext(
+        config=config, condition=condition, model=model
+    )
 
     samples = load_split(config.data.split_file(split))
     if num_samples > 0:

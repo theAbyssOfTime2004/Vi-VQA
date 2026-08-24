@@ -184,7 +184,7 @@ fvqa eval --model-path Qwen/Qwen3-VL-8B-Instruct --condition oracle-seed-graph
 | `style` | thêm system prompt chỉ nói *cách* trả lời, không nói nội dung |
 | `oracle-fact` | thêm đúng supporting fact — cận trên của grounding |
 | `oracle-seed-graph` | thêm entity xuất phát đúng, **không** cho fact ID: phải tự BFS + rank để tìm |
-| `vision-seed-graph` | model tự nhìn ảnh đoán entity (chưa làm — M3) |
+| `vision-seed-graph` | model tự nhìn ảnh đoán entity rồi mới BFS — pipeline thật |
 | `stored` | phát lại đúng prompt trong split file (mặc định; dùng cho checkpoint đã fine-tune) |
 
 Mỗi condition chỉ khác nhau đúng phần context, nên hiệu số điểm chỉ ra lỗi
@@ -195,6 +195,12 @@ oracle-fact − oracle-seed-graph   mất mát do traversal + ranking
 oracle-seed-graph − vision-seed   mất mát do vision-seeding
 vision-seed − no-context          giá trị thật của graph retrieval
 ```
+
+Bước vision-seeding chỉ nhận `(ảnh, câu hỏi)` — không thấy supporting fact
+hay đáp án. Đó là chặn bằng cấu trúc: một seed provider nhìn được annotation
+có thể trả về chính đáp án dưới dạng "đoán", và điều kiện này sẽ đạt điểm
+cao mà không đo gì cả. Seed được cache theo `(model, ảnh, câu hỏi)` nên đổi
+hop/ranker/top-k không phải chạy lại VLM.
 
 Retrieval chạy lúc eval, không bake vào split JSON — đổi `max_hops` hay
 ranker không cần `prepare` lại. Result JSON ghi đủ provenance: seed nào,

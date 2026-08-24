@@ -90,10 +90,11 @@ class TestConditionValidation:
         with pytest.raises(ValueError, match="unknown condition"):
             ConditionContext(config=config, condition="magic")
 
-    def test_vision_seed_graph_says_it_is_not_built_yet(self, config):
-        # Silently falling back to another condition would report a
-        # number for an experiment that never ran.
-        with pytest.raises(NotImplementedError, match="not built yet"):
+    def test_vision_seed_graph_without_a_model_is_rejected(self, config):
+        # It has to ask something what it can see. Silently falling back
+        # to another condition would report a number for an experiment
+        # that never ran.
+        with pytest.raises(ValueError, match="needs a model"):
             ConditionContext(config=config, condition="vision-seed-graph")
 
     def test_only_graph_conditions_load_the_graph(self, config):
@@ -104,9 +105,7 @@ class TestConditionValidation:
 
     def test_every_listed_condition_is_constructible(self, config):
         for condition in CONDITIONS:
-            if condition == "vision-seed-graph":
-                continue
-            ConditionContext(config=config, condition=condition)
+            ConditionContext(config=config, condition=condition, model=object())
 
 
 class TestNoContext:
@@ -293,3 +292,100 @@ class TestBackwardCompatibility:
         }
         prompt = build_prompt(sample, context_for(config, "no-context"))
         assert user_text(prompt) == "What is this?"
+
+
+class StubSeedModel:
+    """Returns a canned reply to the seeding prompt, recording what it saw."""
+
+    def __init__(self, reply):
+        self.reply = reply
+        self.prompts = []
+
+    def generate(self, messages, **kwargs):
+        self.prompts.append(messages)
+        return self.reply
+
+
+class TestVisionSeedGraph:
+    def vision_context(self, config, model, tmp_path, facts=None):
+        config.retrieval.seed_cache_dir = str(tmp_path / "seeds")
+        context = ConditionContext(
+            config=config, condition="vision-seed-graph", model=model
+        )
+        facts = FACTS if facts is None else facts
+        context._facts = facts
+        context._graph = KnowledgeGraph(facts)
+        context._loaded = True
+        from fvqa.retrieval import GraphRetriever
+
+        context._retriever = GraphRetriever.from_config(context._graph, config)
+        return context
+
+    def test_uses_what_the_model_says_it_sees(self, sample, config, tmp_path):
+        model = StubSeedModel('{"entities": ["jazz club"]}')
+        prompt = build_prompt(sample, self.vision_context(config, model, tmp_path))
+        assert prompt.retrieval["seed_texts"] == ["jazz club"]
+        assert prompt.retrieval["condition"] == "vision-seed-graph"
+
+    def test_the_seeding_prompt_never_shows_the_answer_or_the_fact(
+        self, sample, config, tmp_path
+    ):
+        # The guardrail that makes this condition mean anything: a
+        # provider that could see the annotation could return the answer
+        # as its "guess".
+        model = StubSeedModel('{"entities": ["jazz club"]}')
+        build_prompt(sample, self.vision_context(config, model, tmp_path))
+
+        seeding_text = model.prompts[0][-1]["content"][-1]["text"]
+        assert "trumpet" not in seeding_text.lower()
+        assert "f_trumpet" not in seeding_text
+        assert sample["fvqa_question"] in seeding_text
+
+    def test_a_model_naming_nothing_is_recorded(self, sample, config, tmp_path):
+        model = StubSeedModel('{"entities": []}')
+        prompt = build_prompt(sample, self.vision_context(config, model, tmp_path))
+        assert prompt.retrieval["status"] == "no_vision_seed"
+        assert prompt.context is None
+
+    def test_a_guess_the_graph_does_not_know_is_recorded_distinctly(
+        self, sample, config, tmp_path
+    ):
+        # "named nothing" and "named something unknown to the graph" are
+        # different failures and must not be conflated.
+        model = StubSeedModel('{"entities": ["spaceship"]}')
+        prompt = build_prompt(sample, self.vision_context(config, model, tmp_path))
+        assert prompt.retrieval["status"] == "no_seed_match"
+        assert prompt.retrieval["seed_texts"] == ["spaceship"]
+
+    def test_seeds_are_cached_so_the_model_runs_once(self, sample, config, tmp_path):
+        model = StubSeedModel('{"entities": ["jazz club"]}')
+        context = self.vision_context(config, model, tmp_path)
+        build_prompt(sample, context)
+        build_prompt(sample, context)
+        assert len(model.prompts) == 1
+
+    def test_records_whether_the_supporting_fact_survived(
+        self, sample, config, tmp_path
+    ):
+        model = StubSeedModel('{"entities": ["jazz club"]}')
+        prompt = build_prompt(sample, self.vision_context(config, model, tmp_path))
+        assert prompt.retrieval["oracle_fact_retrieved"] is True
+
+    def test_a_plural_guess_still_resolves(self, sample, config, tmp_path):
+        # The model says "jazz clubs"; the node is labelled "jazz club".
+        model = StubSeedModel('{"entities": ["jazz clubs"]}')
+        prompt = build_prompt(sample, self.vision_context(config, model, tmp_path))
+        assert prompt.retrieval["resolved_entities"] == ["jazz club"]
+
+    def test_differs_from_oracle_seed_only_in_where_seeds_came_from(
+        self, sample, config, tmp_path
+    ):
+        # Both conditions must produce the same prompt shape when they
+        # happen to seed identically — otherwise the gap between their
+        # scores measures two things at once.
+        model = StubSeedModel('{"entities": ["jazz club"]}')
+        vision = build_prompt(sample, self.vision_context(config, model, tmp_path))
+        oracle = build_prompt(sample, context_for(config, "oracle-seed-graph"))
+        assert user_text(vision) == user_text(oracle)
+        assert vision.retrieval["seeds"][0]["source"] == "vision"
+        assert oracle.retrieval["seeds"][0]["source"] == "oracle"

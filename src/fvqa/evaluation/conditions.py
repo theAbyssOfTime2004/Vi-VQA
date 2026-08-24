@@ -79,8 +79,11 @@ class ConditionContext:
 
     config: Config
     condition: str
+    #: Required by `vision-seed-graph`, which asks it what it can see.
+    model: Any = None
     _graph: Any = None
     _retriever: Any = None
+    _seed_provider: Any = None
     _facts: dict[str, Any] = field(default_factory=dict)
     _loaded: bool = False
 
@@ -89,12 +92,22 @@ class ConditionContext:
             raise ValueError(
                 f"unknown condition {self.condition!r}. Available: {list(CONDITIONS)}"
             )
-        if self.condition == "vision-seed-graph":
-            raise NotImplementedError(
-                "the vision-seed-graph condition needs a SeedProvider that asks the "
-                "model what it sees; that is not built yet. Use oracle-seed-graph to "
-                "measure traversal and ranking with the vision step taken out."
+        if self.condition == "vision-seed-graph" and self.model is None:
+            raise ValueError(
+                "the vision-seed-graph condition needs a model to ask what it sees; "
+                "none was given"
             )
+
+    @property
+    def seed_provider(self) -> Any:
+        """The vision seed provider, built once and cached on disk."""
+        if self._seed_provider is None:
+            from fvqa.retrieval import QwenVisionSeedProvider, SeedCache
+
+            settings = self.config.retrieval
+            cache = SeedCache(settings.seed_cache_dir, self.config.model.model_id)
+            self._seed_provider = QwenVisionSeedProvider(self.model, cache=cache)
+        return self._seed_provider
 
     @property
     def needs_graph(self) -> bool:
@@ -301,6 +314,12 @@ def build_prompt(
             },
         )
 
+    if context.condition == "vision-seed-graph":
+        # The real pipeline: nothing from the question's annotation
+        # reaches the seeding step, so the starting entity is a guess from
+        # the image, with every way that can go wrong.
+        return _vision_seed_graph(sample, image_path, question, style_prompt, context)
+
     # oracle-seed-graph: given the correct starting entity, but never the
     # correct fact — the traversal has to find it.
     return _oracle_seed_graph(sample, image_path, question, style_prompt, context)
@@ -345,44 +364,47 @@ def _grounded(
     )
 
 
-def _oracle_seed_graph(
+def _seeded_graph(
     sample: Mapping[str, Any],
     image_path: str,
     question: str,
     style_prompt: str,
     context: ConditionContext,
+    *,
+    seeds: list[str],
+    source: str,
+    no_seed_status: str,
 ) -> PreparedPrompt:
+    """Retrieve from `seeds`, ground the result, record how it went.
+
+    Shared by the oracle- and vision-seeded conditions so that the two
+    differ in exactly one thing: where the seeds came from. Any other
+    difference would make the gap between their scores unreadable, which
+    is the only reason both conditions exist.
+    """
     from fvqa.retrieval import format_facts
 
     config = context.config
     fact_ids = sample.get("fvqa_fact_ids") or []
-
-    seeds: list[str] = []
-    if fact_ids:
-        try:
-            triple = context.graph.fact(fact_ids[0])
-        except KeyError:
-            triple = None
-        if triple is not None:
-            seeds = oracle_seed_labels(triple, _answer(sample))
+    settings = config.retrieval
 
     if not seeds:
-        # No usable seed: both endpoints look like the answer, or the
-        # fact id does not resolve. Recorded, not silently downgraded to
-        # a no-context prompt that would score as if retrieval had run.
+        # No usable seed. Recorded, not silently downgraded to a
+        # no-context prompt that would score as if retrieval had run.
         return _grounded(
             image_path, question, None, style_prompt, config,
             retrieval={
-                "condition": "oracle-seed-graph",
-                "status": "no_oracle_seed",
+                "condition": context.condition,
+                "status": no_seed_status,
                 "seed_texts": [],
                 "resolved_entities": [],
                 "facts": [],
-                "settings": config.retrieval.as_dict(),
+                "oracle_fact_ids": list(fact_ids),
+                "oracle_fact_retrieved": False,
+                "settings": settings.as_dict(),
             },
         )
 
-    settings = config.retrieval
     result = context.retriever.retrieve(
         seeds,
         question,
@@ -390,11 +412,11 @@ def _oracle_seed_graph(
         max_seed_entities=settings.max_seed_entities,
         max_candidate_facts=settings.max_candidate_facts,
         top_k_facts=settings.top_k_facts,
-        source="oracle",
+        source=source,
     )
 
     provenance = result.as_dict()
-    provenance["condition"] = "oracle-seed-graph"
+    provenance["condition"] = context.condition
     # Whether the fact the question was actually written from survived
     # retrieval — the per-sample form of recall@k, so a result file can be
     # analysed without re-running anything.
@@ -406,4 +428,56 @@ def _oracle_seed_graph(
     facts_text = format_facts(result.facts) or None
     return _grounded(
         image_path, question, facts_text, style_prompt, config, retrieval=provenance
+    )
+
+
+def _vision_seed_graph(
+    sample: Mapping[str, Any],
+    image_path: str,
+    question: str,
+    style_prompt: str,
+    context: ConditionContext,
+) -> PreparedPrompt:
+    seeds = context.seed_provider.seeds(
+        image_path,
+        question,
+        image_id=sample.get("image", ""),
+        question_id=sample.get("id", ""),
+    )
+    return _seeded_graph(
+        sample, image_path, question, style_prompt, context,
+        seeds=seeds,
+        source="vision",
+        # Distinct from the retriever's own "no_seed_match": this means
+        # the model named nothing at all, not that it named something the
+        # graph does not know.
+        no_seed_status="no_vision_seed",
+    )
+
+
+def _oracle_seed_graph(
+    sample: Mapping[str, Any],
+    image_path: str,
+    question: str,
+    style_prompt: str,
+    context: ConditionContext,
+) -> PreparedPrompt:
+    fact_ids = sample.get("fvqa_fact_ids") or []
+
+    seeds: list[str] = []
+    if fact_ids:
+        try:
+            triple = context.graph.fact(fact_ids[0])
+        except KeyError:
+            triple = None
+        if triple is not None:
+            seeds = oracle_seed_labels(triple, _answer(sample))
+
+    return _seeded_graph(
+        sample, image_path, question, style_prompt, context,
+        seeds=seeds,
+        source="oracle",
+        # Both endpoints look like the answer, or the fact id does not
+        # resolve: a question this condition cannot be run on.
+        no_seed_status="no_oracle_seed",
     )

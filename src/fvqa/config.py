@@ -140,6 +140,11 @@ class RetrievalConfig:
     #: How many ranked facts go into the prompt.
     top_k_facts: int = 5
     ranking_method: str = "lexical"
+    #: Where vision-seeding results are cached. Seeds depend on the model,
+    #: the image and the question and on nothing downstream, so every
+    #: experiment that varies hops, ranker or top-k would otherwise re-run
+    #: the vision model over the whole split to arrive at the same answers.
+    seed_cache_dir: str = "./cache/vision-seeds"
 
     VALID_RANKING_METHODS = ("lexical",)
 

@@ -74,6 +74,11 @@ retrieval:
   # trade-off to re-measure once real generation numbers exist.
   top_k_facts: 5
   ranking_method: "lexical"   # deterministic, no extra model, easy to beat
+  # Vision seeds depend on the model, the image and the question, and on
+  # nothing downstream — so without a cache, every experiment that varies
+  # hops, ranker or top-k re-runs the VLM over the whole split to arrive
+  # at exactly the same seeds.
+  seed_cache_dir: "./cache/vision-seeds"
 
 model:
   model_id: "Qwen/Qwen3-VL-8B-Instruct"

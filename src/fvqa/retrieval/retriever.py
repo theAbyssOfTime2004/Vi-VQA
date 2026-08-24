@@ -50,6 +50,61 @@ def normalize_seed(text: str) -> str:
     return cleaned.strip()
 
 
+def singularize(word: str) -> str:
+    """Crude English plural stripping. Returns the word unchanged if unsure.
+
+    Not a lemmatizer and not trying to be: this exists because a model
+    says "carrots" and the node is labelled "carrot", and pulling in a
+    real morphology library to close that gap would be a dependency
+    bought for one rule. Anything it gets wrong costs a fallback attempt
+    that finds nothing, not a wrong answer.
+    """
+    if len(word) < 4:
+        return word
+    if word.endswith("ies"):
+        return word[:-3] + "y"
+    if word.endswith(("ches", "shes", "sses", "xes", "zes")):
+        return word[:-2]
+    if word.endswith("s") and not word.endswith(("ss", "us", "is")):
+        return word[:-1]
+    return word
+
+
+def seed_variants(text: str) -> list[str]:
+    """Progressively looser forms of a seed, best first.
+
+    A guess that is right but worded differently from the graph's label
+    is the most common way retrieval fails for a reason that has nothing
+    to do with the graph. The ladder: the normalized phrase, its
+    singular, then the head noun of a multi-word phrase and its singular
+    — "orange vegetables" reaching `vegetable` is worth more than
+    reaching nothing.
+
+    Each variant is tried in turn and the first that resolves wins, so a
+    looser form is only ever consulted when the tighter ones found
+    nothing.
+    """
+    normalized = normalize_seed(text)
+    if not normalized:
+        return []
+
+    variants = [normalized]
+
+    singular = " ".join(singularize(word) for word in normalized.split())
+    if singular != normalized:
+        variants.append(singular)
+
+    words = normalized.split()
+    if len(words) > 1:
+        # The head noun of an English noun phrase is the last word.
+        head = words[-1]
+        for candidate in (head, singularize(head)):
+            if candidate and candidate not in variants:
+                variants.append(candidate)
+
+    return variants
+
+
 class GraphRetriever:
     """Finds the facts a question needs by walking the knowledge graph.
 
@@ -85,11 +140,20 @@ class GraphRetriever:
         seen: set[str] = set()
 
         for text in seed_texts:
-            needle = normalize_seed(text)
-            if not needle:
+            variants = seed_variants(text)
+            if not variants:
                 continue
 
-            matches = self.graph.find_entities(needle, limit=max_seed_entities)
+            matches: list[str] = []
+            for variant in variants:
+                matches = self.graph.find_entities(variant, limit=max_seed_entities)
+                if matches:
+                    if variant != variants[0]:
+                        logger.debug(
+                            "seed %r resolved only via the fallback form %r", text, variant
+                        )
+                    break
+
             if not matches:
                 candidates.append(
                     EntityCandidate(text=text, entity_id=None, score=0.0, source=source)
