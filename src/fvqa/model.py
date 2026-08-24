@@ -10,6 +10,10 @@ only once a GPU is attached and a model has been downloaded:
 2. It hard-coded `attn_implementation="flash_attention_2"`. When
    flash-attn is not installed — the Modal image explicitly gives up on
    it — every load raises, even though SDPA attention would have worked.
+
+Which of the three kinds of checkpoint a `--model-path` names, and what
+each one needs, is decided in `fvqa.checkpoint`; this module holds the
+loading itself.
 """
 
 from __future__ import annotations
@@ -19,10 +23,22 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+from fvqa.checkpoint import (
+    NON_LORA_STATE_DICT,
+    CheckpointInfo,
+    inspect_checkpoint,
+    load_non_lora_weights,
+)
 from fvqa.config import Config
 from fvqa.data.grounding import apply_grounding
 
-__all__ = ["VQAModel", "load_model", "resolve_model_class"]
+__all__ = [
+    "VQAModel",
+    "load_full_model",
+    "load_model",
+    "load_peft_model",
+    "resolve_model_class",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -73,14 +89,11 @@ def _torch_dtype(name: str) -> Any:
     return dtype
 
 
-def load_model(model_path: str, config: Config, device_map: str = "auto") -> tuple[Any, Any]:
-    """Load a checkpoint and its processor.
+def _load_backbone(model_path: str, config: Config, device_map: str) -> Any:
+    """Load full model weights, falling back from flash attention to SDPA.
 
-    Falls back from flash attention to SDPA when flash-attn is unavailable,
-    rather than failing the run over an optional speedup.
-
-    Returns:
-        (model, processor)
+    Failing a run over an optional speedup that is merely not installed
+    is not worth it — the Modal image explicitly gives up on flash-attn.
     """
     # resolve_model_class() first: it raises the actionable message when
     # transformers is missing or too old, rather than a bare ImportError.
@@ -93,22 +106,104 @@ def load_model(model_path: str, config: Config, device_map: str = "auto") -> tup
     for attn in attn_implementations:
         try:
             logger.info("loading %s (attn=%s)", model_path, attn)
-            model = model_class.from_pretrained(
+            return model_class.from_pretrained(
                 model_path,
                 dtype=dtype,
                 device_map=device_map,
                 attn_implementation=attn,
             )
-            break
         except (ImportError, ValueError) as error:
             logger.warning("could not load with attn_implementation=%s: %s", attn, error)
             last_error = error
-    else:  # every implementation failed
-        raise RuntimeError(f"failed to load model from {model_path}") from last_error
+
+    raise RuntimeError(f"failed to load model from {model_path}") from last_error
+
+
+def load_full_model(model_path: str, config: Config, device_map: str = "auto") -> Any:
+    """Load a full-weights checkpoint or a HuggingFace model id."""
+    return _load_backbone(model_path, config, device_map)
+
+
+def load_peft_model(
+    info: CheckpointInfo,
+    config: Config,
+    device_map: str = "auto",
+    base_model_id: str | None = None,
+) -> Any:
+    """Load a LoRA adapter on top of the base model it was trained against.
+
+    The order matters and is the same one the trainer's own loader uses:
+    base weights, then `non_lora_state_dict.bin`, then the adapter. The
+    middle step is the one that is easy to leave out and impossible to
+    notice afterwards — see `fvqa.checkpoint` for why.
+
+    Args:
+        info: A `peft` checkpoint, as returned by `inspect_checkpoint`.
+        config: Loaded configuration.
+        device_map: Passed through to `from_pretrained`.
+        base_model_id: Overrides the base model named in
+            `adapter_config.json` — useful when the adapter was trained
+            against a local path that no longer exists.
+    """
+    from peft import PeftModel
+
+    base = base_model_id or info.base_model_id
+    if not base:
+        raise ValueError(f"no base model to load the adapter at {info.path} onto")
+
+    logger.info("adapter checkpoint: %s", info.path)
+    logger.info("  base model:       %s", base)
+
+    model = _load_backbone(base, config, device_map)
+
+    if info.non_lora_path:
+        logger.info("  non-LoRA weights: %s", info.non_lora_path)
+        load_non_lora_weights(model, info.non_lora_path)
+    else:
+        # Not necessarily wrong: with everything but the LoRA tensors
+        # frozen there is nothing else to save. Worth a line in the log
+        # either way, since the alternative reading is a truncated run.
+        logger.info(
+            "  non-LoRA weights: none (%s absent — expected only if the vision "
+            "tower and merger were both frozen)",
+            NON_LORA_STATE_DICT,
+        )
+
+    model = PeftModel.from_pretrained(model, info.path)
+    logger.info("  adapter applied")
+    return model
+
+
+def load_model(
+    model_path: str,
+    config: Config,
+    device_map: str = "auto",
+    base_model_id: str | None = None,
+) -> tuple[Any, Any]:
+    """Load a checkpoint and its processor, whatever kind it turns out to be.
+
+    Accepts a HuggingFace model id, a full-weights checkpoint directory,
+    or a LoRA adapter directory, and dispatches accordingly — see
+    `fvqa.checkpoint.detect_checkpoint_type`.
+
+    Returns:
+        (model, processor)
+    """
+    info = inspect_checkpoint(model_path)
+    logger.info("checkpoint at %s detected as: %s", model_path, info.kind)
+
+    if info.is_adapter:
+        model = load_peft_model(info, config, device_map, base_model_id=base_model_id)
+    else:
+        model = load_full_model(model_path, config, device_map)
 
     from transformers import AutoProcessor
 
-    processor = AutoProcessor.from_pretrained(model_path)
+    processor_source = info.processor_source(fallback=base_model_id or config.model.model_id)
+    if processor_source != model_path:
+        logger.info("processor loaded from %s (checkpoint carries none)", processor_source)
+    processor = AutoProcessor.from_pretrained(processor_source)
+
     return model, processor
 
 
@@ -133,8 +228,11 @@ class VQAModel:
         model_path: str,
         config: Config,
         device_map: str = "auto",
+        base_model_id: str | None = None,
     ) -> "VQAModel":
-        model, processor = load_model(model_path, config, device_map=device_map)
+        model, processor = load_model(
+            model_path, config, device_map=device_map, base_model_id=base_model_id
+        )
         return cls(model=model, processor=processor, config=config)
 
     def build_messages(

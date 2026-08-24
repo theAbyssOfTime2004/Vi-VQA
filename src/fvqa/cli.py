@@ -56,7 +56,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     evaluate = subparsers.add_parser("eval", help="Score a checkpoint on a split")
     _add_common(evaluate)
-    evaluate.add_argument("--model-path", required=True, help="Checkpoint directory or model id")
+    evaluate.add_argument(
+        "--model-path",
+        required=True,
+        help="A model id, a full-weights checkpoint, or a LoRA adapter directory",
+    )
+    evaluate.add_argument(
+        "--base-model",
+        help="Base model for a LoRA adapter, overriding the one named in "
+        "adapter_config.json (needed when it points at a path that has moved)",
+    )
     evaluate.add_argument("--split", help="Split to score (default: evaluation.split)")
     evaluate.add_argument("--num-samples", type=int, help="-1 for the whole split")
     evaluate.add_argument("--output", help="Where to write results JSON")
@@ -64,6 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat = subparsers.add_parser("chat", help="Ask questions about an image interactively")
     _add_common(chat)
     chat.add_argument("--model-path", required=True)
+    chat.add_argument("--base-model", help="Base model for a LoRA adapter (see `eval`)")
     chat.add_argument("--image", help="Skip the image prompt and use this file for every question")
 
     return parser
@@ -103,7 +113,9 @@ def _command_eval(args, config) -> int:
     from fvqa.evaluation.runner import evaluate, format_scores
     from fvqa.model import VQAModel
 
-    model = VQAModel.from_pretrained(args.model_path, config)
+    model = VQAModel.from_pretrained(
+        args.model_path, config, base_model_id=args.base_model
+    )
     result = evaluate(
         model,
         config,
@@ -118,7 +130,9 @@ def _command_eval(args, config) -> int:
 def _command_chat(args, config) -> int:
     from fvqa.model import VQAModel
 
-    model = VQAModel.from_pretrained(args.model_path, config)
+    model = VQAModel.from_pretrained(
+        args.model_path, config, base_model_id=args.base_model
+    )
     grounding_on = config.data.grounding.enabled
 
     print("\nFVQA interactive. Ctrl-D or 'quit' to exit.")
