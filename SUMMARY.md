@@ -114,7 +114,7 @@ huyền tổ hợp — hiển thị y hệt, so sánh ra khác, và dataset có 
 
 ### Test
 
-133 test, không cần torch/transformers/GPU — các tầng config, data và metric cố
+186 test, không cần torch/transformers/GPU — các tầng config, data và metric cố
 tình không import thư viện nặng, nên `pytest` chạy trong vài giây.
 
 ---

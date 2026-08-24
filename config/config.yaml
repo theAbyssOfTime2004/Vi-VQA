@@ -15,6 +15,16 @@ data:
   image_folder: "./data/images"
   image_quality: 95
 
+  # "huggingface" (default) loads dataset_name via datasets.load_dataset.
+  # "fvqa" loads a local FVQA release instead (see data.fvqa below) — a real
+  # knowledge graph (225,434 DBpedia/ConceptNet/WebChild triples), not free
+  # text. Download: https://www.dropbox.com/s/iyz6l7jhbt6jb7q/new_dataset_release.zip?dl=1
+  source: "huggingface"
+  fvqa:
+    root: "./data/fvqa"    # directory the FVQA zip extracts into
+    fold: 0                # FVQA ships 5 official train/test folds (0-4)
+    max_hops: 2             # graph traversal depth for the retrieval experiment
+
   # Stream instead of downloading the whole split up front. Combine with
   # `vivqa prepare --limit N` to fetch only the first N records — matters on
   # Colab/Kaggle where disk is tight.

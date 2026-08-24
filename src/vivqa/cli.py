@@ -76,6 +76,18 @@ def _command_config(args, config) -> int:
 
 
 def _command_prepare(args, config) -> int:
+    if config.data.source == "fvqa":
+        from vivqa.data.fvqa import prepare_fvqa
+
+        counts = prepare_fvqa(config, limit=args.limit)
+        print("\nPrepared FVQA dataset")
+        print(f"  questions read   {counts.pop('questions', 0)}")
+        for split, count in counts.items():
+            print(f"  {split:<16} {count} samples -> {config.data.split_file(split)}")
+        print(f"  fold             {config.data.fvqa.fold}")
+        print(f"  grounding        {'on (oracle fact)' if config.data.grounding.enabled else 'off'}")
+        return 0
+
     from vivqa.data.prepare import prepare
 
     counts = prepare(config, limit=args.limit, overwrite=args.overwrite)

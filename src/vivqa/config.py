@@ -27,6 +27,7 @@ __all__ = [
     "ConfigError",
     "DataConfig",
     "EvaluationConfig",
+    "FvqaConfig",
     "GroundingConfig",
     "InferenceConfig",
     "LoraConfig",
@@ -116,11 +117,39 @@ class GroundingConfig:
 
 
 @dataclass
+class FvqaConfig:
+    """Where the local FVQA release lives, and how to traverse its graph.
+
+    FVQA has to be downloaded and extracted by hand (no `datasets.load_dataset`
+    support): https://www.dropbox.com/s/iyz6l7jhbt6jb7q/new_dataset_release.zip?dl=1
+    `root` should point at the directory that zip extracts into, containing
+    `Name_Lists/` and `new_dataset_release/`.
+    """
+
+    root: str = "./data/fvqa"
+    fold: int = 0  # FVQA ships 5 official train/test folds, numbered 0-4
+    max_hops: int = 2  # graph traversal depth for the retrieval experiment
+
+    def validate(self, path: str) -> None:
+        if not 0 <= self.fold <= 4:
+            raise ConfigError(f"{path}.fold must be in [0, 4], got {self.fold}")
+        if self.max_hops < 1:
+            raise ConfigError(f"{path}.max_hops must be positive, got {self.max_hops}")
+
+
+@dataclass
 class DataConfig:
     dataset_name: str = "5CD-AI/Viet-ViTextVQA-gemini-VQA"
     data_dir: str = "./data"
     image_folder: str = "./data/images"
     image_quality: int = 95
+
+    # "huggingface" (default) loads dataset_name via datasets.load_dataset.
+    # "fvqa" loads a local FVQA release instead — see FvqaConfig. Nothing
+    # else in this section (dataset_name, streaming, image_quality) applies
+    # in that mode.
+    source: str = "huggingface"
+    fvqa: FvqaConfig = field(default_factory=FvqaConfig)
 
     # Stream records instead of downloading the whole split first. Pair it
     # with `vivqa prepare --limit N` to pull only the first N records —
@@ -132,13 +161,20 @@ class DataConfig:
     splits: SplitConfig = field(default_factory=SplitConfig)
     grounding: GroundingConfig = field(default_factory=GroundingConfig)
 
+    VALID_SOURCES = ("huggingface", "fvqa")
+
     def validate(self, path: str) -> None:
+        if self.source not in self.VALID_SOURCES:
+            raise ConfigError(
+                f"{path}.source must be one of {self.VALID_SOURCES}, got {self.source!r}"
+            )
         if not 1 <= self.image_quality <= 100:
             raise ConfigError(
                 f"{path}.image_quality must be in [1, 100], got {self.image_quality}"
             )
         self.splits.validate(f"{path}.splits")
         self.grounding.validate(f"{path}.grounding")
+        self.fvqa.validate(f"{path}.fvqa")
 
     def split_file(self, split: str) -> str:
         """Path of the JSON file holding a given split."""

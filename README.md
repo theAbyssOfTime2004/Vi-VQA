@@ -81,6 +81,49 @@ vivqa prepare --set data.grounding.enabled=true
 Chi tiết, hai chế độ `prefix`/`system`, và quy trình A/B để đo tác động:
 [`docs/GROUNDING.md`](docs/GROUNDING.md).
 
+## FVQA — knowledge graph thật
+
+Vi-VQA/Encyclopedic-style grounding dùng free text. **FVQA** khác hẳn: 225.434
+triple `(e1, relation, e2)` thật từ DBpedia/ConceptNet/WebChild, đủ để build
+một đồ thị và tự viết BFS/DFS trên đó — không phải nhét text vào prompt.
+
+```bash
+# Tải và giải nén thủ công (không có datasets.load_dataset cho FVQA):
+# https://www.dropbox.com/s/iyz6l7jhbt6jb7q/new_dataset_release.zip?dl=1 (~451MB)
+# Giải nén ra một thư mục có Name_Lists/ và new_dataset_release/
+
+vivqa prepare \
+  --set data.source=fvqa \
+  --set data.fvqa.root=/path/to/extracted
+```
+
+FVQA có sẵn 5 fold train/test (0-4, chọn bằng `data.fvqa.fold`) — `test` giữ
+nguyên theo đúng fold gốc để so được với kết quả trong paper; `val` được cắt
+từ `train` bằng cùng `assign_splits` dùng cho Vi-VQA.
+
+```python
+from vivqa.data import KnowledgeGraph
+
+g = KnowledgeGraph.from_facts_file("new_dataset_release/all_fact_triples_release.json")
+seeds = g.find_entities("trumpet")           # ['/c/en/trumpet', '/c/en/trumpet/n', ...]
+facts = g.bfs(seeds, max_hops=1)              # BFS thật, không phải embedding search
+path = g.shortest_path(entity_a, entity_b)    # None nếu không nối được
+```
+
+`vivqa prepare --set data.grounding.enabled=true` với FVQA cho ra **oracle
+fact** — model được cho thẳng đúng fact hỗ trợ câu hỏi (`fact_surface`), tách
+biệt với việc tự đi tìm fact đó bằng `KnowledgeGraph.bfs`. Hai điều kiện này
+đo hai câu hỏi khác nhau: oracle đo "biết fact đúng thì giúp được bao nhiêu",
+graph retrieval đo "tự tìm fact đúng bằng cách duyệt đồ thị thì còn lại bao
+nhiêu". Phần "seed graph bằng thực thể model tự nhận diện từ ảnh, rồi rank
+kết quả BFS" chưa được nối vào eval — `KnowledgeGraph` đã có sẵn để lắp thêm.
+
+Template grounding mặc định là tiếng Việt (kế thừa từ Vi-VQA) — FVQA là tiếng
+Anh, nhớ override:
+```bash
+--set 'data.grounding.template=Context: {description}\n\nQuestion: {question}'
+```
+
 ## Cấu trúc
 
 ```
@@ -91,7 +134,9 @@ src/vivqa/
   model.py                  # nạp Qwen3-VL, sinh câu trả lời
   data/
     prepare.py              # HF dataset -> JSON theo format Qwen-VL
-    grounding.py            # ngữ cảnh từ description
+    grounding.py            # ngữ cảnh từ description (oracle fact với FVQA)
+    fvqa.py                 # loader FVQA (không qua datasets.load_dataset)
+    fvqa_graph.py           # KnowledgeGraph: BFS/DFS/shortest-path thật
   train/
     command.py              # config -> argv cho trainer
     runner.py               # clone trainer repo và chạy
@@ -101,7 +146,7 @@ src/vivqa/
 scripts/
   train_qwen3vl.sh          # wrapper mỏng cho chạy local
   train_on_modal.py         # phần thuộc về Modal, không chứa logic dataset
-tests/                      # 133 test, chạy không cần GPU
+tests/                      # 186 test, chạy không cần GPU
 notebooks/
   eda.ipynb                 # phân tích dataset
   baseline_a1.ipynb         # chấm base model zero-shot, không train
@@ -148,7 +193,7 @@ khác nhau, và dataset có cả hai.
 
 ```bash
 pip install -e '.[dev]'
-pytest                       # 133 test, không cần torch/transformers
+pytest                       # 186 test, không cần torch/transformers
 ```
 
 Tầng config, data và metrics cố tình không import torch, nên test chạy trong vài
