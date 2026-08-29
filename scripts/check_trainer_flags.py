@@ -20,7 +20,11 @@ HuggingFace Trainer fields that have been stable for years. A rename on
 that side is `transformers`' problem to flag in their own changelog, not
 something this project's flag contract needs to re-derive.
 
-Usage:
+Run this by hand — nothing runs it automatically. The two moments it can
+tell you anything are when `trainer.revision` is bumped and when
+`build_train_command()` is edited, so it belongs next to those changes
+rather than on a timer:
+
     python scripts/check_trainer_flags.py <path-to-cloned-trainer-repo>
 
 Exits non-zero (and prints exactly which flags are wrong) on a mismatch.

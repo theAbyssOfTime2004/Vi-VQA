@@ -125,11 +125,19 @@ M2 graph retrieval (text seed) → M3 vision-seeding → M4 Modal + CI**.
   trainer là `eval_path`** — mọi lần train có kèm validation split (tức là
   mặc định, vì `fvqa prepare` luôn ra `val.json`) sẽ chết vài phút sau khi
   chạy vì `HfArgumentParser` từ chối flag lạ. Đã sửa.
-- `.github/workflows/ci.yml` — CPU-only, Python 3.10-3.12, `pytest` +
-  `compileall` + `fvqa config`, chạy mọi PR.
-- `.github/workflows/integration.yml` — `workflow_dispatch` + weekly, clone
-  trainer đúng revision pin, verify entrypoint/deepspeed config, chạy
-  `check_trainer_flags.py`, tải FVQA thật rồi `fvqa train --dry-run`.
+- `.github/workflows/ci.yml` — CPU-only, Python 3.10-3.12, `ruff` +
+  `pytest` + `compileall` + `fvqa config`, chạy mọi PR. **Đây là CI duy
+  nhất.** Có một `integration.yml` chạy theo lịch tuần (clone trainer, tải
+  FVQA 451MB, `fvqa train --dry-run`) nhưng đã bỏ: một job tuần tải 451MB
+  để kiểm tra thứ chỉ đổi khi *chính mình* đổi pin thì trả phí đều đặn cho
+  giá trị không đều đặn.
+- `check_trainer_flags.py` giờ là **kiểm tra tay trước khi train**, không
+  còn tự chạy. Nên chạy khi đổi `trainer.revision` hoặc sửa
+  `build_train_command()` — hai lúc duy nhất nó có thể phát hiện điều gì:
+
+  ```bash
+  python scripts/check_trainer_flags.py <thư-mục-trainer-đã-clone>
+  ```
 - 172 test (từ 162), gồm `test_train_runner.py` mới (dùng git repo cục bộ
   làm "remote" giả, không cần mạng) và case cho `TrainerConfig` trong
   `test_config.py`.

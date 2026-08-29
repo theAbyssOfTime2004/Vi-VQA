@@ -1,7 +1,10 @@
 name: CI
 
-# Fast, CPU-only checks on every push/PR. No dataset download, no model
-# weights, no CUDA, no Modal — those live in integration.yml instead.
+# The only CI. Fast, CPU-only checks on every push/PR: no dataset
+# download, no model weights, no CUDA, no Modal. Anything needing those
+# is run by hand — `scripts/check_trainer_flags.py` when the pinned
+# trainer revision or the command builder changes, `scripts/smoke_gpu.sh`
+# or `modal run ... --step smoke` before a real training run.
 on:
   push:
     branches: ["main"]
