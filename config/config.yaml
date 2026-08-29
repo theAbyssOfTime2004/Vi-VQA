@@ -135,7 +135,9 @@ training:
   merger_lr: 2.0e-5                              # vision-language projector
   lr_scheduler_type: "cosine"
   weight_decay: 0.1
-  warmup_ratio: 0.03
+  # Steps, not a ratio: transformers 5 removed warmup_ratio. 10 is about
+  # the 3% the old ratio gave on a 2-epoch run (~364 optimizer steps).
+  warmup_steps: 10
   max_grad_norm: 1.0
 
   optim: "adamw_bnb_8bit"

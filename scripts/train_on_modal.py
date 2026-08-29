@@ -360,8 +360,48 @@ def smoke_import():
     # surfaced separately, three minutes into a GPU container, because
     # nothing checked until training actually reached the import.
     trainer = _check_trainer_imports(config)
+    flags = _check_trainer_flags(trainer["repo"])
 
-    return {"level": 1, "ok": True, "conditions": list(CONDITIONS), "trainer": trainer}
+    return {
+        "level": 1,
+        "ok": True,
+        "conditions": list(CONDITIONS),
+        "trainer": trainer,
+        "flags_checked": flags,
+    }
+
+
+def _check_trainer_flags(repo: str) -> int:
+    """Verify every flag the training command can emit is one the trainer takes.
+
+    Worth running here rather than only by hand: transformers is
+    installed in this image, so the inherited Trainer fields are read
+    from the real thing. That is the difference between catching
+    `--warmup_ratio` (removed in transformers 5) in seconds with no GPU,
+    and catching it four minutes into an A100 container.
+    """
+    import sys
+
+    sys.path.insert(0, "/root/scripts")
+    from pathlib import Path
+
+    from check_trainer_flags import _emitted_flags, _trainer_field_names  # type: ignore
+
+    known, exact = _trainer_field_names(Path(repo) / "src")
+    emitted = _emitted_flags()
+    unknown = sorted(emitted - known)
+
+    if unknown:
+        raise RuntimeError(
+            f"the training command emits {unknown}, which the trainer's parser does "
+            "not accept. Fix src/fvqa/train/command.py or the config field behind it."
+        )
+
+    print(
+        f"trainer flags: all {len(emitted)} accepted "
+        f"({'exact' if exact else 'partial — transformers missing'})"
+    )
+    return len(emitted)
 
 
 def _check_trainer_imports(config) -> dict[str, object]:
@@ -399,7 +439,11 @@ def _check_trainer_imports(config) -> dict[str, object]:
         )
 
     print(f"  all {len(reached)} present")
-    return {"checked": sorted(reached), "revision": config.trainer.revision[:12]}
+    return {
+        "checked": sorted(reached),
+        "revision": config.trainer.revision[:12],
+        "repo": repo,
+    }
 
 
 @app.function(image=image, volumes={DATA_DIR: data_volume}, timeout=1800, memory=8192)

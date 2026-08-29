@@ -384,7 +384,12 @@ class TrainingConfig:
     merger_lr: float = 2e-5
     lr_scheduler_type: str = "cosine"
     weight_decay: float = 0.1
-    warmup_ratio: float = 0.03
+    # Steps, not a ratio: transformers 5 removed `warmup_ratio` and kept
+    # `warmup_steps`, and this project's pinned trainer requires
+    # transformers 5. `warmup_steps` also exists on 4.x, so it is the one
+    # spelling that works either side of that break. 10 is roughly the
+    # 3% the old ratio gave on a 2-epoch FVQA run (~364 optimizer steps).
+    warmup_steps: int = 10
     max_grad_norm: float = 1.0
 
     optim: str = "adamw_bnb_8bit"
@@ -428,9 +433,9 @@ class TrainingConfig:
                 raise ConfigError(f"{path}.{name} must be at least 1")
         if self.freeze_llm and self.freeze_vision_tower and self.freeze_merger:
             raise ConfigError(f"{path}: every component is frozen, nothing would train")
-        if not 0.0 <= self.warmup_ratio <= 1.0:
+        if self.warmup_steps < 0:
             raise ConfigError(
-                f"{path}.warmup_ratio must be in [0, 1], got {self.warmup_ratio}"
+                f"{path}.warmup_steps must be non-negative, got {self.warmup_steps}"
             )
 
     @property

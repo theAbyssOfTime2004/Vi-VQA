@@ -9,16 +9,20 @@ is that check: it enumerates the flags every code path in
 `build_train_command` can emit, and confirms each one is a real field on
 the trainer's `ModelArguments` / `DataArguments` / `TrainingArguments`.
 
-Field names for `ModelArguments`/`DataArguments`/`TrainingArguments` are
-read with `ast`, not by importing the trainer — that repo pulls in
-torch/transformers/trl/accelerate just to define those dataclasses, and
-this check has no reason to pay for that install. `TrainingArguments`
-inherits most of its fields from `transformers.TrainingArguments`
-(HFTrainingArguments) rather than declaring them itself, so those
-inherited names are a small hardcoded allowlist below — standard
-HuggingFace Trainer fields that have been stable for years. A rename on
-that side is `transformers`' problem to flag in their own changelog, not
-something this project's flag contract needs to re-derive.
+The trainer's own field names are read with `ast`, not by importing it —
+that repo pulls in torch/trl/accelerate just to define those dataclasses.
+Its `TrainingArguments` inherits most of its fields from
+`transformers.TrainingArguments`, and those are read from the *installed*
+transformers when it is importable.
+
+That last part is the whole check, and an earlier version got it wrong.
+It used a hardcoded list of "standard HuggingFace fields that have been
+stable for years", which reported all flags fine while the run died on
+`--warmup_ratio`: transformers 5 removed it (keeping `warmup_steps`).
+An allowlist cannot notice a field disappearing upstream, which is the
+one thing this check exists to notice. When transformers is not
+installed the fallback list is still used, and the output says the check
+was partial rather than implying it was complete.
 
 Run this by hand — nothing runs it automatically. The two moments it can
 tell you anything are when `trainer.revision` is bumped and when
@@ -38,10 +42,10 @@ import ast
 import sys
 from pathlib import Path
 
-# Standard transformers.TrainingArguments fields that
-# 2U1/Qwen-VL-Series-Finetune's TrainingArguments inherits rather than
-# redeclares, and that build_train_command() relies on.
-_KNOWN_HF_TRAINING_ARGS = {
+# Used only when transformers is not installed, to say something rather
+# than nothing. Necessarily out of date the moment upstream changes —
+# `warmup_ratio` sat in this list while transformers 5 no longer had it.
+_FALLBACK_HF_TRAINING_ARGS = {
     "output_dir",
     "remove_unused_columns",
     "deepspeed",
@@ -61,7 +65,7 @@ _KNOWN_HF_TRAINING_ARGS = {
     "learning_rate",
     "lr_scheduler_type",
     "weight_decay",
-    "warmup_ratio",
+    "warmup_steps",
     "max_grad_norm",
     "optim",
     "gradient_checkpointing",
@@ -87,7 +91,22 @@ def _dataclass_field_names(source: str, class_names: set[str]) -> set[str]:
     return names
 
 
-def _trainer_field_names(trainer_src: Path) -> set[str]:
+def _hf_training_arg_names() -> tuple[set[str], bool]:
+    """Fields of the installed `transformers.TrainingArguments`.
+
+    Returns:
+        (field names, whether they came from the real transformers)
+    """
+    try:
+        import dataclasses as _dc
+
+        from transformers import TrainingArguments
+    except Exception:  # noqa: BLE001 - any import failure means "not available"
+        return set(_FALLBACK_HF_TRAINING_ARGS), False
+    return {field.name for field in _dc.fields(TrainingArguments)}, True
+
+
+def _trainer_field_names(trainer_src: Path) -> tuple[set[str], bool]:
     params_py = trainer_src / "params.py"
     if not params_py.is_file():
         raise FileNotFoundError(f"{params_py} not found")
@@ -95,7 +114,8 @@ def _trainer_field_names(trainer_src: Path) -> set[str]:
     own_fields = _dataclass_field_names(
         source, {"ModelArguments", "DataArguments", "TrainingArguments"}
     )
-    return own_fields | _KNOWN_HF_TRAINING_ARGS
+    inherited, exact = _hf_training_arg_names()
+    return own_fields | inherited, exact
 
 
 def _emitted_flags() -> set[str]:
@@ -138,9 +158,16 @@ def main() -> int:
     trainer_root = Path(sys.argv[1]).resolve()
     trainer_src = trainer_root / "src"
 
-    known = _trainer_field_names(trainer_src)
+    known, exact = _trainer_field_names(trainer_src)
     emitted = _emitted_flags()
     unknown = sorted(emitted - known)
+
+    if not exact:
+        print(
+            "NOTE: transformers is not installed here, so inherited Trainer fields "
+            "come from a fallback list and this check is partial. Run it in the "
+            "environment that will do the training for a real answer.\n"
+        )
 
     if unknown:
         print("FAIL: build_train_command() emits flag(s) the trainer does not accept:")
@@ -149,11 +176,16 @@ def main() -> int:
         print(
             "\nCheck the field names in "
             f"{trainer_src}/params.py (ModelArguments/DataArguments/TrainingArguments) "
+            "and in the installed transformers.TrainingArguments, "
             "against src/fvqa/train/command.py."
         )
         return 1
 
-    print(f"OK: all {len(emitted)} flags build_train_command() can emit are recognized.")
+    source = "installed transformers" if exact else "a fallback list"
+    print(
+        f"OK: all {len(emitted)} flags build_train_command() can emit are recognized "
+        f"(inherited fields from {source})."
+    )
     return 0
 
 

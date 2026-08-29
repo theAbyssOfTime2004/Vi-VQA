@@ -222,7 +222,7 @@ def build_train_command(
         "--merger_lr", str(training.merger_lr),
         "--lr_scheduler_type", training.lr_scheduler_type,
         "--weight_decay", str(training.weight_decay),
-        "--warmup_ratio", str(training.warmup_ratio),
+        "--warmup_steps", str(training.warmup_steps),
         "--max_grad_norm", str(training.max_grad_norm),
         "--optim", training.optim,
 

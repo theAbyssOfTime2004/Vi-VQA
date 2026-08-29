@@ -370,7 +370,7 @@ Sửa luôn mấy chỗ Modal-specific dễ âm thầm hỏng:
 bắt lỗi thật — tên chưa định nghĩa, import thừa, mutable default — chứ
 không đem chuyện format ra review lại.
 
-## Ba bug chỉ chạy thật mới lộ ra
+## Bốn bug chỉ chạy thật mới lộ ra
 
 Smoke test mức 4 trên GPU thật bắt được hai lỗi mà 347 test, ruff,
 `--dry-run` và `check_trainer_flags.py` đều không thể thấy. Cả hai đều
@@ -417,13 +417,39 @@ Test cố định luôn tập dependency đã biết (9 package): nếu trainer 
 pin bắt đầu import thêm thứ gì, đó là quyết định cần cân nhắc, không phải
 bất ngờ giữa run.
 
-Cả ba giờ có unit test. Hai bài học:
+**4. `--warmup_ratio` không tồn tại trong transformers 5.**
+Và tệ hơn: **`check_trainer_flags.py` báo OK cho nó.** Script đó đối chiếu
+field kế thừa từ `transformers.TrainingArguments` với một **danh sách cứng**
+tôi tự viết, kèm lý luận "đây là field chuẩn của HF, ổn định nhiều năm rồi".
+
+Lý luận đó sai. transformers 5 bỏ `warmup_ratio`, giữ `warmup_steps`. Một
+allowlist về nguyên tắc **không thể** phát hiện field biến mất ở upstream —
+mà đó đúng là việc duy nhất script này sinh ra để làm.
+
+Sửa: khi transformers import được thì đọc field thật từ
+`dataclasses.fields(TrainingArguments)`; không import được thì vẫn dùng
+danh sách dự phòng nhưng **nói rõ kết quả chỉ là một phần**, không ngụ ý
+đầy đủ. Cài transformers thật rồi chạy lại → tái hiện đúng lỗi, và
+`--warmup_ratio` là mismatch **duy nhất** — nên không còn vòng lặp từng cái.
+
+Config đổi `warmup_ratio: 0.03` → `warmup_steps: 10` (~3% của ~364 step
+trong run 2 epoch). `warmup_steps` có ở cả 4.x lẫn 5.x nên là cách viết
+chạy được hai bên.
+
+Kiểm tra flag giờ chạy luôn ở **smoke mức 1** — image có transformers nên
+đối chiếu là chính xác, và không tốn GPU.
+
+Cả bốn giờ có unit test. Hai bài học:
 
 - `--dry-run` chứng minh được *lệnh đúng*, không chứng minh được *môi trường
   chạy đúng*.
 - Sửa từng `ModuleNotFoundError` một là vòng lặp không có điểm dừng. Phải
-  hỏi "cái gì đảm bảo danh sách này đúng?" — câu trả lời là đồ thị import,
-  không phải trí nhớ.
+  hỏi "cái gì đảm bảo danh sách này đúng?" — câu trả lời là đồ thị import
+  và field thật của thư viện đã cài, không phải trí nhớ.
+- **Một cái check dựa trên danh sách cứng còn tệ hơn không có check**, vì
+  nó báo xanh. Bug 4 sống sót qua đúng cái script viết ra để bắt nó.
+
+Cả bốn lỗi giờ bị bắt ở **mức 1** — không GPU, không data, dưới một phút.
 
 ## Còn lại — đều cần GPU
 
