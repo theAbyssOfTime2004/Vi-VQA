@@ -362,13 +362,41 @@ Sửa luôn mấy chỗ Modal-specific dễ âm thầm hỏng:
 bắt lỗi thật — tên chưa định nghĩa, import thừa, mutable default — chứ
 không đem chuyện format ra review lại.
 
-### Còn lại
+## Còn lại — đều cần GPU
 
-**M3**: `SeedProvider` interface, Qwen3-VL vision-seeding có cache, fallback
-khi `find_entities` không match, nối `vision-seed-graph`.
+Cả 4 milestone đã xong. Mọi thứ còn lại đều là **chạy thật**, không phải
+viết thêm code:
 
-**M4**: Modal smoke test theo 4 mức (import → prepare → baseline GPU →
-train 2-step GPU), lint (`ruff`) thêm sau CI cơ bản.
+1. **Chưa từng train thật.** Mới xác nhận `--dry-run` sinh đúng lệnh và
+   `check_trainer_flags.py` khớp 53 flag với trainer đã pin. Bước tiếp:
+   `bash scripts/smoke_gpu.sh` (local) hoặc
+   `modal run scripts/train_on_modal.py --step smoke` (Modal).
+2. **Chưa có số generation thật.** Mọi con số trong tài liệu này là
+   **recall của retrieval** — tỉ lệ supporting fact vào được prompt. Đó là
+   *cận trên* của phần grounding đóng góp được, không phải điểm cuối. Chạy
+   4 condition trên cùng tập mẫu mới ra bảng so sánh thật.
+3. **Vision-seeding chưa chạy với model thật.** Con số 25,7% ở M3 dùng stub
+   đoán rộng rãi (biết trước `e1_label` của supporting fact). Qwen3-VL thật
+   sẽ tệ hơn — chênh lệch giữa hai con số chính là cái cần đo.
+
+## Nút thắt đã xác định được
+
+Từ chuỗi đo (152 câu val thật):
+
+```
+oracle-fact       100,0%
+oracle-seed-graph  50,7%   ← mất 49,3pp ở traversal + ranking
+vision-seed-graph  25,7%   ← mất thêm 25,0pp ở vision-seeding
+```
+
+**Tầng traversal + ranking mất nhiều hơn tầng vision** — ngược với trực
+giác ban đầu (nghĩ bước nhìn ảnh mới là chỗ khó). Lexical ranker đang là
+nút thắt lớn nhất, và đó là lý do *cụ thể, có số* để cân nhắc embedding
+hoặc LLM reranker, thay vì "nghe có vẻ tốt hơn".
+
+Chỗ ranker thua nhìn thấy rõ: câu như "What can a dog do?" sau khi bỏ
+stopword chỉ còn đúng seed, mọi fact của `dog` điểm bằng nhau, tie-break
+theo fact id. Nếu làm reranker thì đây là tập con để đo trước.
 
 Chi tiết đầy đủ từng PR nằm trong lịch sử hội thoại — tài liệu này chỉ ghi
 quyết định và trạng thái đã verify.
