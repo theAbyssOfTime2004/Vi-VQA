@@ -1,84 +1,181 @@
-project_name: "Vi-VQA"
+# FVQA configuration.
+#
+# This file is the single source of truth. Every entry point reads it:
+#   fvqa prepare / fvqa train / fvqa eval / fvqa chat
+#   scripts/train_qwen3vl.sh  (local)
+#   scripts/train_on_modal.py (Modal)
+# Nothing below is duplicated in code — override with --set key=value.
+
+project_name: "FVQA"
 seed: 42
 
 data:
-  dataset_name: "5CD-AI/Viet-ViTextVQA-gemini-VQA"
+  # FVQA has to be downloaded and extracted by hand (no datasets.load_dataset
+  # support — this is a real knowledge graph, 225,434 DBpedia/ConceptNet/
+  # WebChild triples, not a HuggingFace text dataset):
+  # https://www.dropbox.com/s/iyz6l7jhbt6jb7q/new_dataset_release.zip?dl=1
   data_dir: "./data"
-  image_folder: "./data/images"
-  max_length: 2048  # Increased for VLM
-  preprocessing:
-    mode: "vlm"  # Options: "baseline", "llm", "vlm"
-    image_size: 224  # For baseline model (legacy)
-    # Image resolution for Qwen3-VL (token × 32 × 32)
-    image_min_pixels: 262144  # 256 * 32 * 32
-    image_max_pixels: 1310720  # 1280 * 32 * 32
+  root: "./data/fvqa"                              # directory the zip extracts into
+  image_folder: "./data/fvqa/new_dataset_release/images"  # override together with root
+  fold: 0                                           # FVQA ships 5 official train/test folds (0-4)
+
+  # Fractions must sum to 1.0. FVQA's own test fold is kept intact (so
+  # scores stay comparable to the paper); only train/val are carved with
+  # this, at the *image* level, so QA pairs about one image never straddle
+  # the boundary.
+  splits:
+    train: 0.90
+    val: 0.05
+    test: 0.05
+
+  # Oracle-fact grounding: feed the question's one correct supporting fact
+  # (its `surface` text) back into the prompt. Answers a different question
+  # than graph retrieval (KnowledgeGraph.bfs) — "if the model is simply told
+  # the right fact, how much does it help?" vs. "if it has to find that fact
+  # itself by walking the graph, how much is lost?"
+  grounding:
+    enabled: false
+    mode: "prefix"        # prefix = inline in the user turn, system = separate system turn
+    max_chars: 1200       # facts longer than this are truncated on a sentence boundary
+    # 'prefix' mode: fact + question in one user turn.
+    template: "Fact: {description}\n\nUsing the fact above, answer: {question}"
+    # 'system' mode: fact only, question stays in the user turn.
+    system_template: "Fact: {description}"
+
+# Graph retrieval: the model has to *find* the supporting fact by walking
+# the knowledge graph from a guessed starting entity, instead of being
+# handed it. Separate from data.grounding above, which is the oracle
+# condition — the gap between the two scores is what the graph is worth.
+#
+# These are algorithm parameters, not dataset properties (max_hops used to
+# sit under `data`, which was the wrong place), and they are recorded in
+# every result file: a score from hop 1 and a score from hop 3 are
+# otherwise indistinguishable after the fact.
+retrieval:
+  enabled: false
+  # Measured: under `--condition oracle-seed-graph`, hops 1/2/3 give
+  # *identical* recall (52.8% @ top-5 on 282 real questions). That is
+  # structural, not a finding about the graph: the oracle seed is taken
+  # from the supporting fact's own endpoint, so that fact is always one
+  # hop away and deeper walks only add lower-ranked noise. Multi-hop is
+  # for vision-seeded retrieval, where the model's guess may be a
+  # *neighbour* of the right entity rather than the right entity — so the
+  # default stays 2 for the pipeline this is actually aimed at.
+  max_hops: 2
+  max_seed_entities: 5        # graph nodes the seed guesses may resolve to
+  # Traversal cap, applied before ranking. Measured on 981 real questions
+  # (oracle seed, 1 hop): recall@5 of the supporting fact is 59.4% at 100,
+  # 61.1% at 300, 62.7% at 5000. 300 costs 1.6 ms/question — free next to
+  # one VLM generate call — so it is the default rather than 100.
+  max_candidate_facts: 300
+  # Ranked facts that reach the prompt. 5 -> 10 raises recall of the
+  # supporting fact from 52.8% to 61.3%, at the cost of a longer prompt
+  # and more chances for the model to latch onto a wrong fact — the
+  # trade-off to re-measure once real generation numbers exist.
+  top_k_facts: 5
+  ranking_method: "lexical"   # deterministic, no extra model, easy to beat
+  # Vision seeds depend on the model, the image and the question, and on
+  # nothing downstream — so without a cache, every experiment that varies
+  # hops, ranker or top-k re-runs the VLM over the whole split to arrive
+  # at exactly the same seeds.
+  seed_cache_dir: "./cache/vision-seeds"
 
 model:
-  type: "vlm"  # Options: "baseline", "llm", "vlm"
-  vlm:
-    model_id: "Qwen/Qwen3-VL-8B-Instruct"
-    use_flash_attn: true
-    torch_dtype: "bfloat16"
+  model_id: "Qwen/Qwen3-VL-8B-Instruct"
+  torch_dtype: "bfloat16"
+  use_flash_attn: true
 
-    # LoRA Configuration
-    lora:
-      enabled: true
-      rank: 128
-      alpha: 256
-      dropout: 0.05
-      target_modules: "all"  # -1 for all layers
-      vision_lora: false  # Set true to also tune vision encoder
+  # Qwen3-VL packs pixels into 32x32 patches; these bounds are in pixels.
+  image_min_pixels: 262144    # 256 * 32 * 32
+  image_max_pixels: 1310720   # 1280 * 32 * 32
 
-    # QLoRA Configuration (use instead of LoRA for lower memory)
-    qlora:
-      enabled: false  # Set true to use 4-bit quantization
-      bnb_4bit_compute_dtype: "bfloat16"
-      bnb_4bit_quant_type: "nf4"
-      bnb_4bit_use_double_quant: true
+  # full | lora | qlora. One enum rather than lora.enabled + qlora.enabled,
+  # because two booleans allow a fourth state that means nothing: QLoRA
+  # *is* LoRA adapters on a 4-bit base, and "qlora without lora" used to
+  # quantize the base and attach nothing trainable to it.
+  tuning_method: "lora"
+
+  # Read when tuning_method is lora or qlora.
+  lora:
+    rank: 128
+    alpha: 256
+    dropout: 0.05
+    num_lora_modules: -1                          # -1 = every eligible module
+    namespan_exclude: ["lm_head", "embed_tokens"]
+    vision_lora: false
+
+  # Read only when tuning_method is qlora. The compute dtype is absent on
+  # purpose: the trainer derives it from training.bf16/fp16 and exposes no
+  # flag for it, so a setting here could not be forwarded anywhere.
+  quantization:
+    quant_type: "nf4"                             # nf4 | fp4
+    double_quant: true
+
+# The external trainer (2U1/Qwen-VL-Series-Finetune) moves independently
+# of this project. Pinning a revision here is what makes "config + code"
+# reproducible instead of "config + code + whatever HEAD was that day" —
+# see src/fvqa/train/command.py for the contract this commit is checked
+# against.
+trainer:
+  repo_url: "https://github.com/2U1/Qwen-VL-Series-Finetune.git"
+  revision: "70c7b2fcb0e276b1fa4b136852e9b862ce8730fa"
 
 training:
-  # Basic training config
-  num_train_epochs: 3
-  per_device_train_batch_size: 2  # Reduced for VLM
-  per_device_eval_batch_size: 2
-  gradient_accumulation_steps: 8  # Effective batch size = 2 * 8 = 16
+  output_dir: "./checkpoints/qwen3vl-fvqa"
+  num_train_epochs: 2
+  # null runs the full epoch schedule. Set to a small number for a GPU
+  # smoke run — see scripts/smoke_gpu.sh.
+  max_steps: null
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 16               # effective batch = 1 * 16
 
-  # Learning rates
-  learning_rate: 2e-5  # LLM learning rate
-  vision_lr: 2e-6  # Vision encoder (5-10x smaller)
-  merger_lr: 2e-5  # Projector learning rate
-
-  # Optimizer
-  optim: "adamw_bnb_8bit"  # Memory efficient optimizer
-  weight_decay: 0.01
+  learning_rate: 2.0e-5                          # LLM
+  vision_lr: 2.0e-6                              # vision tower, 10x smaller
+  merger_lr: 2.0e-5                              # vision-language projector
+  lr_scheduler_type: "cosine"
+  weight_decay: 0.1
   warmup_ratio: 0.03
+  max_grad_norm: 1.0
 
-  # Checkpointing
-  output_dir: "./checkpoints"
-  save_strategy: "steps"
-  save_steps: 500
-  save_total_limit: 3
+  optim: "adamw_bnb_8bit"
+  bf16: true
+  fp16: false
+  tf32: true
+  gradient_checkpointing: true
+  dataloader_num_workers: 4
+  lazy_preprocess: true
 
-  # Evaluation
-  eval_strategy: "steps"
-  eval_steps: 500
-
-  # Logging
-  logging_steps: 50
-  logging_dir: "./logs"
-  report_to: "tensorboard"
-
-  # DeepSpeed (optional, for multi-GPU)
-  deepspeed: null  # Set to deepspeed config path if needed
-
-  # Freezing options
-  freeze_vision_tower: true  # Only tune LLM + projector
+  freeze_vision_tower: true
   freeze_llm: false
   freeze_merger: false
 
-  # Advanced
-  fp16: false
-  bf16: true
-  gradient_checkpointing: true
-  max_grad_norm: 1.0
-  dataloader_num_workers: 4
+  save_strategy: "steps"
+  save_steps: 500
+  save_total_limit: 3
+  eval_strategy: "steps"
+  eval_steps: 500
+  load_best_model_at_end: true
+  metric_for_best_model: "eval_loss"
+  greater_is_better: false
+
+  logging_steps: 50
+  report_to: "tensorboard"
+  deepspeed: "scripts/zero2.json"                # null to disable
+
+inference:
+  max_new_tokens: 512
+  temperature: 0.7
+  top_p: 0.9
+
+  # Style-only system turn — says how to answer, never what is in the image.
+  # Deliberately separate from data.grounding, which supplies facts: mixing
+  # the two makes it impossible to attribute a score change to either.
+  # e.g. "Trả lời ngắn gọn bằng tiếng Việt, đúng một câu, không giải thích."
+  system_prompt: ""
+
+evaluation:
+  split: "val"
+  num_samples: 200                               # -1 for the whole split
+  temperature: 0.0                               # greedy: eval must be reproducible
+  metrics: ["exact_match", "similarity", "bleu", "rouge_l", "cider"]

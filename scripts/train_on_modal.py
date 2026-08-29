@@ -1,1047 +1,588 @@
-"""
-Vi-VQA Training on Modal
-========================
-Script để train Qwen3-VL trên Modal platform.
+"""FVQA training pipeline on Modal.
+
+All dataset, configuration and command-building logic lives in the
+`fvqa` package and is shared with the local run — this file contains
+only what is genuinely Modal-specific: the container image, the volumes
+and the function boundaries.
 
 Usage:
-    # 1. Install Modal CLI
     pip install modal
-
-    # 2. Login to Modal
     modal token new
+    modal secret create huggingface-secret HF_TOKEN=hf_...   # for the model only; FVQA itself needs no auth
 
-    # 3. Create HuggingFace secret
-    modal secret create huggingface-secret HF_TOKEN=hf_your_token_here
+    modal run scripts/train_on_modal.py --step prepare
+    modal run scripts/train_on_modal.py --step train
+    modal run scripts/train_on_modal.py --step evaluate
+    modal run scripts/train_on_modal.py --step baseline
+    modal run scripts/train_on_modal.py::check_status
 
-    # 4. Run training pipeline
-    modal run scripts/train_on_modal.py
-
-    # 5. Run specific function
-    modal run scripts/train_on_modal.py::prepare_dataset
-    modal run scripts/train_on_modal.py::train_model
-    modal run scripts/train_on_modal.py::evaluate_model
-
-Training time (estimated):
-    - A10G: ~20-25 giờ
-    - A100: ~8-12 giờ
-    - H100: ~4-6 giờ
+FVQA is much smaller than a typical VQA fine-tuning corpus — 2,190 images,
+5,826 questions — so a run here is proportionally shorter than a dataset
+with tens of thousands of QA pairs would take on the same GPU.
 """
 
-import modal
+from __future__ import annotations
+
 import os
+from pathlib import Path
 
-# ============================================
-# Modal App Configuration
-# ============================================
-app = modal.App("vi-vqa-training")
+import modal
 
-# Container image with all dependencies
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+app = modal.App("fvqa-training")
+
+FVQA_ZIP_URL = "https://www.dropbox.com/s/iyz6l7jhbt6jb7q/new_dataset_release.zip?dl=1"
+
 image = (
-    modal.Image.from_registry(
-        "nvidia/cuda:12.4.0-devel-ubuntu22.04",
-        add_python="3.11"
-    )
+    modal.Image.from_registry("nvidia/cuda:12.4.0-devel-ubuntu22.04", add_python="3.11")
     .apt_install("git", "wget", "unzip")
     .pip_install(
-        # Core ML
         "torch>=2.0.0",
         "torchvision",
-        # Transformers & Training
-        "transformers>=4.45.0",
+        # Qwen3VLForConditionalGeneration does not exist before 4.57.
+        "transformers>=4.57.0",
         "accelerate>=0.34.0",
         "peft>=0.13.0",
         "bitsandbytes>=0.44.0",
         "deepspeed>=0.15.0",
-        # Data processing
-        "datasets>=3.0.0",
-        "pillow>=10.0.0",
-        "pyyaml",
-        "scipy",
-        "tqdm",
-        # Qwen-VL specific
         "qwen-vl-utils>=0.0.8",
-        # HuggingFace
-        "huggingface_hub>=0.26.0",
-        # Evaluation
-        "nltk",
-        "rouge-score",
-        # Additional
-        "wandb",
+        "pyyaml>=6.0",
         "tensorboard",
     )
-    .env({"CUDA_HOME": "/usr/local/cuda"})
-    .run_commands(
-        # Install flash-attention (optional, may fail on some GPUs)
-        "pip install flash-attn --no-build-isolation || echo 'Flash attention not available'"
+    .env(
+        {
+            "CUDA_HOME": "/usr/local/cuda",
+            "FVQA_CONFIG": "/root/config/config.yaml",
+            # Explicit rather than relying on the working directory
+            # happening to be importable: `import fvqa` should not depend
+            # on where Modal chose to start the process.
+            "PYTHONPATH": "/root/src",
+        }
     )
+    .run_commands("pip install flash-attn --no-build-isolation || echo 'flash-attn unavailable'")
+    # Ship the package and config instead of duplicating their logic here.
+    .add_local_dir(REPO_ROOT / "src", remote_path="/root/src")
+    .add_local_dir(REPO_ROOT / "config", remote_path="/root/config")
 )
 
-# Persistent volumes for data and checkpoints
-data_volume = modal.Volume.from_name("vi-vqa-data", create_if_missing=True)
-checkpoint_volume = modal.Volume.from_name("vi-vqa-checkpoints", create_if_missing=True)
+#: Loading a model needs the HuggingFace token. Every function that loads
+#: one gets this — including the baseline and the smoke tests, which used
+#: to be the ones that quietly failed on a gated repo.
+HF_SECRET = modal.Secret.from_name("huggingface-secret")
 
-# Volume mount paths
+data_volume = modal.Volume.from_name("fvqa-data", create_if_missing=True)
+checkpoint_volume = modal.Volume.from_name("fvqa-checkpoints", create_if_missing=True)
+
 DATA_DIR = "/data"
 CHECKPOINT_DIR = "/checkpoints"
-IMAGE_FOLDER = "/data/images"
+FVQA_ROOT = f"{DATA_DIR}/fvqa"
+VOLUMES = {DATA_DIR: data_volume, CHECKPOINT_DIR: checkpoint_volume}
+
+# Point the shared config at the mounted volumes. Everything else —
+# learning rates, LoRA rank, grounding — still comes from config.yaml.
+VOLUME_OVERRIDES = [
+    f"data.data_dir={DATA_DIR}",
+    f"data.root={FVQA_ROOT}",
+    f"data.image_folder={FVQA_ROOT}/new_dataset_release/images",
+    f"training.output_dir={CHECKPOINT_DIR}/qwen3vl-fvqa",
+    # On the volume so vision seeds survive the container: recomputing
+    # them is a VLM call per question, and they do not depend on any
+    # retrieval setting an experiment might vary.
+    f"retrieval.seed_cache_dir={DATA_DIR}/vision-seeds",
+]
 
 
-# ============================================
-# Step 1: Prepare Dataset
-# ============================================
+def _load(extra_overrides: list[str] | None = None):
+    """Load the shared config with volume paths applied."""
+    from fvqa.config import load_config
+    from fvqa.utils import setup_logging
+
+    setup_logging()
+    return load_config(overrides=VOLUME_OVERRIDES + list(extra_overrides or []))
+
+
+def _login() -> None:
+    token = os.environ.get("HF_TOKEN")
+    if token:
+        from huggingface_hub import login
+
+        login(token=token)
+        print("✓ logged in to HuggingFace")
+
+
+def _ensure_fvqa_downloaded(root: str) -> None:
+    """Download and extract the FVQA release into `root` if not already there.
+
+    FVQA is not on HuggingFace, so there is no `datasets.load_dataset` to
+    lean on — a plain HTTP download + zip extraction, done once per volume.
+    """
+    import subprocess
+    import zipfile
+
+    marker = os.path.join(root, "Name_Lists")
+    if os.path.isdir(marker):
+        print(f"✓ FVQA already present at {root}")
+        return
+
+    os.makedirs(root, exist_ok=True)
+    zip_path = "/tmp/fvqa.zip"
+    print(f"downloading FVQA release (~451MB) from {FVQA_ZIP_URL}")
+    subprocess.run(["wget", "-q", "-O", zip_path, FVQA_ZIP_URL], check=True)
+
+    print("extracting...")
+    with zipfile.ZipFile(zip_path) as archive:
+        archive.extractall(root)
+    os.remove(zip_path)
+    print(f"✓ extracted to {root}")
+
+
 @app.function(
     image=image,
     volumes={DATA_DIR: data_volume},
-    secrets=[modal.Secret.from_name("huggingface-secret")],
-    timeout=3600,  # 1 hour
-    memory=8192,   # 8GB RAM
+    timeout=3600,
+    memory=8192,
 )
-def prepare_dataset():
-    """
-    Download and process Viet-ViTextVQA dataset.
-    
-    Output:
-        - /data/train.json (~28K samples)
-        - /data/val.json (~3K samples)
-        - /data/images/ (~9.5K images)
-    """
-    from datasets import load_dataset
-    from huggingface_hub import login
-    from PIL import Image
-    import json
-    from tqdm import tqdm
-    import random
+def prepare_dataset(limit: int | None = None, grounding: bool = False):
+    """Download FVQA (if needed) and write train/val/test splits to the volume."""
+    from fvqa.data.fvqa import prepare_fvqa
 
-    # Login to HuggingFace
-    hf_token = os.environ.get("HF_TOKEN")
-    if hf_token:
-        login(token=hf_token)
-        print("✓ Logged in to HuggingFace")
+    config = _load([f"data.grounding.enabled={str(grounding).lower()}"])
 
-    # Create directories
-    os.makedirs(IMAGE_FOLDER, exist_ok=True)
-
-    # Check if already processed
-    train_path = f"{DATA_DIR}/train.json"
-    val_path = f"{DATA_DIR}/val.json"
-    
-    if os.path.exists(train_path) and os.path.exists(val_path):
-        with open(train_path, 'r') as f:
-            train_count = len(json.load(f))
-        with open(val_path, 'r') as f:
-            val_count = len(json.load(f))
-        print(f"✓ Dataset already prepared: {train_count} train, {val_count} val")
-        data_volume.commit()
-        return {"train": train_count, "val": val_count, "status": "cached"}
-
-    print("Loading dataset from HuggingFace...")
-    dataset = load_dataset("5CD-AI/Viet-ViTextVQA-gemini-VQA", split="train")
-    print(f"✓ Loaded {len(dataset)} samples")
-    print(f"Columns: {dataset.column_names}")
-
-    # Process dataset
-    processed_samples = []
-    
-    print("Processing dataset...")
-    for idx in tqdm(range(len(dataset))):
-        item = dataset[idx]
-        image = item["image"]
-        conversations = item.get("conversations", [])
-
-        if not conversations:
-            continue
-
-        # Save image
-        image_filename = f"image_{item['id']}.jpg"
-        image_path = os.path.join(IMAGE_FOLDER, image_filename)
-
-        if not os.path.exists(image_path):
-            try:
-                if image.mode != "RGB":
-                    image = image.convert("RGB")
-                image.save(image_path, quality=95)
-            except Exception as e:
-                print(f"Warning: Failed to save image {idx}: {e}")
-                continue
-
-        # Process conversations
-        current_question = None
-        for turn in conversations:
-            role = turn.get("role", turn.get("from"))
-            content = turn.get("content", turn.get("value"))
-
-            if role in ["user", "human"]:
-                current_question = content
-            elif role in ["assistant", "gpt"] and current_question:
-                processed_samples.append({
-                    "id": f"{item['id']}_{len(processed_samples)}",
-                    "image": image_filename,
-                    "conversations": [
-                        {"from": "human", "value": f"<image>\n{current_question}"},
-                        {"from": "gpt", "value": content}
-                    ]
-                })
-                current_question = None
-
-    print(f"✓ Processed {len(processed_samples)} QA pairs")
-
-    # Split dataset: 90% train, 10% validation
-    random.seed(42)
-    shuffled_samples = processed_samples.copy()
-    random.shuffle(shuffled_samples)
-
-    split_idx = int(len(shuffled_samples) * 0.9)
-    train_samples = shuffled_samples[:split_idx]
-    val_samples = shuffled_samples[split_idx:]
-
-    print(f"\n📊 Dataset Split:")
-    print(f"  Train: {len(train_samples)} samples ({len(train_samples)/len(processed_samples)*100:.1f}%)")
-    print(f"  Val:   {len(val_samples)} samples ({len(val_samples)/len(processed_samples)*100:.1f}%)")
-
-    # Save datasets
-    with open(train_path, "w", encoding="utf-8") as f:
-        json.dump(train_samples, f, ensure_ascii=False, indent=2)
-    print(f"✓ Saved train set to {train_path}")
-
-    with open(val_path, "w", encoding="utf-8") as f:
-        json.dump(val_samples, f, ensure_ascii=False, indent=2)
-    print(f"✓ Saved validation set to {val_path}")
-
-    # Count images
-    num_images = len(os.listdir(IMAGE_FOLDER))
-    print(f"✓ Saved {num_images} images to {IMAGE_FOLDER}")
-
-    # Commit volume changes
+    _ensure_fvqa_downloaded(config.data.root)
+    counts = prepare_fvqa(config, limit=limit)
     data_volume.commit()
 
-    return {
-        "train": len(train_samples),
-        "val": len(val_samples),
-        "images": num_images,
-        "status": "created"
-    }
+    print(f"\n✓ prepared: {counts}")
+    return counts
 
 
-# ============================================
-# Debug: Test Environment
-# ============================================
 @app.function(
     image=image,
     gpu="A100",
-    volumes={
-        DATA_DIR: data_volume,
-        CHECKPOINT_DIR: checkpoint_volume,
-    },
+    volumes=VOLUMES,
     secrets=[modal.Secret.from_name("huggingface-secret")],
-    timeout=3600,
+    timeout=86400,
     memory=32768,
 )
-def test_environment():
-    """
-    Test if the training environment is properly set up.
-    This helps debug issues before running full training.
-    """
-    import subprocess
-    import sys
-    from huggingface_hub import login
-    
-    print("=" * 80)
-    print("🔍 Testing Training Environment")
-    print("=" * 80)
-    
-    # 1. Check GPU
-    print("\n1. GPU Info:")
-    subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total,memory.free", "--format=csv"])
-    
-    # 2. Check Python packages
-    print("\n2. Key Packages:")
-    import torch
-    print(f"   PyTorch: {torch.__version__}")
-    print(f"   CUDA available: {torch.cuda.is_available()}")
-    if torch.cuda.is_available():
-        print(f"   CUDA version: {torch.version.cuda}")
-        print(f"   GPU: {torch.cuda.get_device_name(0)}")
-    
-    import transformers
-    print(f"   Transformers: {transformers.__version__}")
-    
-    try:
-        import peft
-        print(f"   PEFT: {peft.__version__}")
-    except:
-        print("   PEFT: NOT INSTALLED ⚠️")
-    
-    try:
-        import bitsandbytes
-        print(f"   BitsAndBytes: {bitsandbytes.__version__}")
-    except:
-        print("   BitsAndBytes: NOT INSTALLED ⚠️")
-    
-    # 3. Login to HuggingFace
-    print("\n3. HuggingFace Login:")
-    hf_token = os.environ.get("HF_TOKEN")
-    if hf_token:
-        login(token=hf_token)
-        print("   ✓ Logged in successfully")
-    else:
-        print("   ⚠️ HF_TOKEN not found")
-    
-    # 4. Check data files
-    print("\n4. Data Files:")
-    train_path = f"{DATA_DIR}/train.json"
-    val_path = f"{DATA_DIR}/val.json"
-    print(f"   Train exists: {os.path.exists(train_path)}")
-    print(f"   Val exists: {os.path.exists(val_path)}")
-    print(f"   Images folder exists: {os.path.exists(IMAGE_FOLDER)}")
-    if os.path.exists(IMAGE_FOLDER):
-        print(f"   Number of images: {len(os.listdir(IMAGE_FOLDER))}")
-    
-    # 5. Clone and check training repo
-    print("\n5. Training Repository:")
-    repo_dir = "/root/Qwen-VL-Series-Finetune"
-    if not os.path.exists(repo_dir):
-        print("   Cloning repository...")
-        subprocess.run([
-            "git", "clone",
-            "https://github.com/2U1/Qwen-VL-Series-Finetune.git",
-            repo_dir
-        ], check=True)
-    
-    print(f"   Repo exists: {os.path.exists(repo_dir)}")
-    
-    # List files in repo
-    print(f"   Files in repo:")
-    for f in os.listdir(repo_dir)[:10]:
-        print(f"      - {f}")
-    
-    # Check if train.py exists
-    train_script = os.path.join(repo_dir, "src", "train", "train_sft.py")
-    print(f"   src/train/train_sft.py exists: {os.path.exists(train_script)}")
-    
-    # List scripts folder
-    scripts_dir = os.path.join(repo_dir, "scripts")
-    if os.path.exists(scripts_dir):
-        print(f"   Scripts in scripts/:")
-        for f in os.listdir(scripts_dir)[:10]:
-            print(f"      - {f}")
-    
-    # List src/train folder
-    train_dir = os.path.join(repo_dir, "src", "train")
-    if os.path.exists(train_dir):
-        print(f"   Files in src/train/:")
-        for f in os.listdir(train_dir)[:10]:
-            print(f"      - {f}")
-    
-    # 6. Try to import model (dry run)
-    print("\n6. Model Loading Test:")
-    try:
-        from transformers import AutoConfig
-        config = AutoConfig.from_pretrained("Qwen/Qwen3-VL-8B-Instruct", trust_remote_code=True)
-        print(f"   ✓ Can access model config")
-        print(f"   Model type: {config.model_type}")
-    except Exception as e:
-        print(f"   ⚠️ Error accessing model: {e}")
-    
-    # 7. Check deepspeed
-    print("\n7. Checking deepspeed:")
-    try:
-        import deepspeed
-        print(f"   ✓ Deepspeed version: {deepspeed.__version__}")
-    except Exception as e:
-        print(f"   ⚠️ Deepspeed error: {e}")
-    
-    print("\n" + "=" * 80)
-    print("🔍 Environment Test Complete")
-    print("=" * 80)
-    
-    return {"status": "ok"}
-
-
-# ============================================
-# Step 2: Training
-# ============================================
-@app.function(
-    image=image,
-    gpu="A100",  # Options: "T4", "A10G", "A100", "H100"
-    volumes={
-        DATA_DIR: data_volume,
-        CHECKPOINT_DIR: checkpoint_volume,
-    },
-    secrets=[modal.Secret.from_name("huggingface-secret")],
-    timeout=86400,  # 24 hours
-    memory=32768,   # 32GB RAM
-)
 def train_model(
-    num_epochs: int = 2,
-    batch_size: int = 1,
-    grad_accum: int = 16,
-    learning_rate: float = 2e-5,
-    lora_rank: int = 128,
-    resume_from_checkpoint: bool = True,
-    debug: bool = False,
+    num_epochs: int | None = None,
+    batch_size: int | None = None,
+    grad_accum: int | None = None,
+    resume: bool = True,
+    dry_run: bool = False,
 ):
+    """Fine-tune Qwen3-VL with LoRA.
+
+    Arguments left as None fall back to config/config.yaml.
     """
-    Fine-tune Qwen3-VL with LoRA on Vi-VQA dataset.
-    
-    Args:
-        num_epochs: Number of training epochs
-        batch_size: Per-device batch size
-        grad_accum: Gradient accumulation steps
-        learning_rate: Learning rate for LLM
-        lora_rank: LoRA rank (higher = more capacity)
-        resume_from_checkpoint: Resume from last checkpoint if exists
-    """
-    import subprocess
-    from huggingface_hub import login
+    from fvqa.train.runner import run_training
 
-    # Login to HuggingFace
-    hf_token = os.environ.get("HF_TOKEN")
-    if hf_token:
-        login(token=hf_token)
-        print("✓ Logged in to HuggingFace")
+    _login()
 
-    # Check if data exists
-    train_path = f"{DATA_DIR}/train.json"
-    val_path = f"{DATA_DIR}/val.json"
-    
-    if not os.path.exists(train_path):
-        raise FileNotFoundError(
-            f"Training data not found at {train_path}. "
-            "Run prepare_dataset first: modal run scripts/train_on_modal.py::prepare_dataset"
-        )
+    overrides = []
+    if num_epochs is not None:
+        overrides.append(f"training.num_train_epochs={num_epochs}")
+    if batch_size is not None:
+        overrides.append(f"training.per_device_train_batch_size={batch_size}")
+    if grad_accum is not None:
+        overrides.append(f"training.gradient_accumulation_steps={grad_accum}")
 
-    # Clone training repository
-    repo_dir = "/root/Qwen-VL-Series-Finetune"
-    if not os.path.exists(repo_dir):
-        print("Cloning Qwen-VL-Series-Finetune repository...")
-        subprocess.run([
-            "git", "clone",
-            "https://github.com/2U1/Qwen-VL-Series-Finetune.git",
-            repo_dir
-        ], check=True)
-        print("✓ Cloned training repository")
-        
-        # Install repo dependencies
-        print("Installing training repository dependencies...")
-        subprocess.run(
-            ["pip", "install", "-e", repo_dir],
-            check=False,
-            capture_output=True
-        )
-        
-        # Install additional requirements if exists
-        req_file = os.path.join(repo_dir, "requirements.txt")
-        if os.path.exists(req_file):
-            subprocess.run(
-                ["pip", "install", "-r", req_file],
-                check=False,
-                capture_output=True
-            )
-        print("✓ Installed dependencies")
-    else:
-        print("✓ Training repository already exists")
+    config = _load(overrides)
 
-    os.chdir(repo_dir)
+    print(f"model:  {config.model.model_id}")
+    print(f"epochs: {config.training.num_train_epochs}")
+    print(f"batch:  {config.training.effective_batch_size} effective")
+    print(f"tuning: {config.model.tuning_method}")
+    if config.model.uses_lora:
+        print(f"LoRA:   rank={config.model.lora.rank} alpha={config.model.lora.alpha}")
 
-    # Training configuration
-    MODEL_ID = "Qwen/Qwen3-VL-8B-Instruct"
-    OUTPUT_DIR = f"{CHECKPOINT_DIR}/qwen3vl-vivqa"
-    
-    # Create output directory
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    
-    # Image resolution (Qwen3-VL uses 32x32 patches)
-    IMAGE_MIN_PIXELS = 256 * 32 * 32   # 262144
-    IMAGE_MAX_PIXELS = 1280 * 32 * 32  # 1310720
-
-    # Build training command using deepspeed (the correct way for this repo)
-    # The repo uses src/train/train_sft.py for SFT training
-    train_cmd = [
-        "deepspeed",
-        "--num_gpus=1",  # Single GPU on Modal
-        "src/train/train_sft.py",
-        # LoRA config
-        "--lora_enable", "True",
-        "--use_dora", "False",
-        "--lora_rank", str(lora_rank),
-        "--lora_alpha", str(lora_rank * 2),
-        "--lora_dropout", "0.05",
-        "--num_lora_modules", "-1",  # All modules
-        "--lora_namespan_exclude", "['lm_head', 'embed_tokens']",
-        # Deepspeed config
-        "--deepspeed", "scripts/zero2.json",
-        # Model
-        "--model_id", MODEL_ID,
-        # Data
-        "--data_path", train_path,
-        "--eval_data_path", val_path,
-        "--image_folder", IMAGE_FOLDER,
-        "--output_dir", OUTPUT_DIR,
-        "--remove_unused_columns", "False",
-        # Freezing
-        "--freeze_vision_tower", "True",
-        "--freeze_llm", "False",  # Train LLM with LoRA
-        "--freeze_merger", "False",
-        # Precision
-        "--bf16", "True",
-        "--fp16", "False",
-        "--tf32", "True",
-        # Training params
-        "--num_train_epochs", str(num_epochs),
-        "--per_device_train_batch_size", str(batch_size),
-        "--per_device_eval_batch_size", str(batch_size),
-        "--gradient_accumulation_steps", str(grad_accum),
-        # Image config (Qwen3-VL uses 32x32 patches)
-        "--image_min_pixels", str(IMAGE_MIN_PIXELS),
-        "--image_max_pixels", str(IMAGE_MAX_PIXELS),
-        # Learning rates
-        "--learning_rate", str(learning_rate),
-        "--vision_lr", str(learning_rate / 10),
-        "--merger_lr", str(learning_rate),
-        # Optimization
-        "--weight_decay", "0.1",
-        "--warmup_ratio", "0.03",
-        "--lr_scheduler_type", "cosine",
-        "--gradient_checkpointing", "True",
-        "--max_grad_norm", "1.0",
-        "--dataloader_num_workers", "4",
-        # Disable flash attention (not installed)
-        "--disable_flash_attn2", "True",
-        # Evaluation & Saving
-        "--eval_strategy", "steps",
-        "--eval_steps", "500",
-        "--save_strategy", "steps",
-        "--save_steps", "500",
-        "--save_total_limit", "3",
-        "--load_best_model_at_end", "True",
-        "--metric_for_best_model", "eval_loss",
-        "--greater_is_better", "False",
-        # Logging
-        "--logging_steps", "50",
-        "--report_to", "tensorboard",
-        # Other
-        "--lazy_preprocess", "True",
-    ]
-
-    # Add resume flag if checkpoint exists
-    if resume_from_checkpoint and os.path.exists(OUTPUT_DIR):
-        checkpoints = [d for d in os.listdir(OUTPUT_DIR) if d.startswith("checkpoint-")]
-        if checkpoints:
-            train_cmd.extend(["--resume_from_checkpoint", "true"])
-            print(f"📂 Found checkpoints: {checkpoints}")
-            print("   Will resume from latest checkpoint")
-
-    print("\n" + "=" * 80)
-    print("🚀 Starting Training")
-    print("=" * 80)
-    print(f"Model: {MODEL_ID}")
-    print(f"Epochs: {num_epochs}")
-    print(f"Batch size: {batch_size} × {grad_accum} = {batch_size * grad_accum}")
-    print(f"Learning rate: {learning_rate}")
-    print(f"LoRA rank: {lora_rank}")
-    print(f"Output: {OUTPUT_DIR}")
-    print("=" * 80 + "\n")
-
-    # Run training with full output capture
-    print("Running training command...")
-    print(f"Command: {' '.join(train_cmd[:10])}...")  # Print first part of command
-    
-    result = subprocess.run(
-        train_cmd, 
-        check=False,
-        text=True,
-        # Capture and stream output
+    exit_code = run_training(
+        config,
+        trainer_dir="/root/Qwen-VL-Series-Finetune",
+        num_gpus=1,
+        resume=resume,
+        dry_run=dry_run,
     )
-    
-    if result.returncode != 0:
-        print(f"\n⚠️ Training exited with code {result.returncode}")
-        
-        # Try to find error logs
-        log_dir = os.path.join(OUTPUT_DIR, "runs")
-        if os.path.exists(log_dir):
-            print(f"Check logs at: {log_dir}")
-    else:
-        print("\n✓ Training completed successfully!")
-
-    # Commit checkpoint volume
     checkpoint_volume.commit()
 
-    # List saved checkpoints
-    if os.path.exists(OUTPUT_DIR):
-        checkpoints = sorted([d for d in os.listdir(OUTPUT_DIR) if d.startswith("checkpoint-")])
-        print(f"\n📦 Saved checkpoints: {checkpoints}")
-        return {"status": "completed", "checkpoints": checkpoints}
-    
-    return {"status": "completed", "checkpoints": []}
+    output_dir = config.training.output_dir
+    checkpoints = sorted(os.listdir(output_dir)) if os.path.isdir(output_dir) else []
+    return {"exit_code": exit_code, "checkpoints": checkpoints}
 
 
-# ============================================
-# Step 3: Evaluation
-# ============================================
 @app.function(
     image=image,
     gpu="A100",
-    volumes={
-        DATA_DIR: data_volume,
-        CHECKPOINT_DIR: checkpoint_volume,
-    },
-    timeout=7200,  # 2 hours
+    volumes=VOLUMES,
+    # It loads a model, so it needs the token just as much as training
+    # does. Without this a gated or rate-limited repo fails here only.
+    secrets=[HF_SECRET],
+    timeout=7200,
     memory=32768,
 )
 def evaluate_model(
-    checkpoint_name: str = "checkpoint-best",
-    num_samples: int = 100,
-    temperature: float = 0.7,
+    model_path: str | None = None,
+    checkpoint: str | None = None,
+    num_samples: int | None = None,
+    split: str = "val",
+    condition: str = "stored",
+    base_model: str | None = None,
 ):
-    """
-    Evaluate trained model on validation set.
-    
+    """Score a model on a split.
+
     Args:
-        checkpoint_name: Name of checkpoint folder (e.g., "checkpoint-1500")
-        num_samples: Number of samples to evaluate (use -1 for all)
-        temperature: Generation temperature
+        model_path: A HuggingFace model id or absolute path. Use this to
+            score the un-finetuned base model — the baseline a fine-tuning
+            result has to be read against.
+        checkpoint: A checkpoint directory name under the output dir.
+        num_samples: How many samples to score; -1 for the whole split.
+        split: Which split to score.
+        condition: Prompt condition — stored / no-context / style /
+            oracle-fact / oracle-seed-graph / vision-seed-graph.
+        base_model: Base model for a LoRA adapter whose recorded
+            base_model_name_or_path no longer resolves.
+
+    With neither model_path nor checkpoint, the newest checkpoint is used.
     """
-    import torch
-    from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
-    from qwen_vl_utils import process_vision_info
-    from difflib import SequenceMatcher
-    import json
-    from tqdm import tqdm
+    from fvqa.evaluation.runner import evaluate, format_scores
+    from fvqa.model import VQAModel
+    from fvqa.train.command import resolve_model_source
 
-    # Find checkpoint path
-    checkpoint_base = f"{CHECKPOINT_DIR}/qwen3vl-vivqa"
-    
-    if checkpoint_name == "checkpoint-best":
-        # Find the latest/best checkpoint
-        if os.path.exists(checkpoint_base):
-            checkpoints = sorted([
-                d for d in os.listdir(checkpoint_base) 
-                if d.startswith("checkpoint-")
-            ])
-            if checkpoints:
-                checkpoint_name = checkpoints[-1]
-                print(f"📂 Using latest checkpoint: {checkpoint_name}")
-            else:
-                raise FileNotFoundError("No checkpoints found!")
-        else:
-            raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_base}")
+    _login()
 
-    checkpoint_path = os.path.join(checkpoint_base, checkpoint_name)
-    
-    if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-
-    print(f"Loading model from {checkpoint_path}...")
-    
-    # Load model
-    model = Qwen2VLForConditionalGeneration.from_pretrained(
-        checkpoint_path,
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
+    config = _load()
+    path = resolve_model_source(
+        model_path=model_path,
+        checkpoint=checkpoint,
+        output_dir=config.training.output_dir,
     )
-    processor = AutoProcessor.from_pretrained(checkpoint_path)
-    print("✓ Model loaded!")
+    print(f"📂 evaluating {path} (condition: {condition})")
 
-    # Load validation data
-    val_path = f"{DATA_DIR}/val.json"
-    with open(val_path, "r", encoding="utf-8") as f:
-        val_data = json.load(f)
-
-    if num_samples > 0:
-        val_data = val_data[:num_samples]
-    
-    print(f"\n📊 Evaluating on {len(val_data)} samples...")
-
-    def ask_question(image_path, question):
-        """Generate answer for a question about an image."""
-        messages = [{
-            "role": "user",
-            "content": [
-                {"type": "image", "image": image_path},
-                {"type": "text", "text": question}
-            ]
-        }]
-
-        # Apply chat template
-        text = processor.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True
-        )
-
-        # Process vision info
-        image_inputs, video_inputs = process_vision_info(messages)
-
-        # Prepare inputs
-        inputs = processor(
-            text=[text],
-            images=image_inputs,
-            videos=video_inputs,
-            padding=True,
-            return_tensors="pt"
-        ).to(model.device)
-
-        with torch.inference_mode():
-            generated_ids = model.generate(
-                **inputs,
-                max_new_tokens=512,
-                temperature=temperature,
-                top_p=0.9,
-                do_sample=True if temperature > 0 else False,
-            )
-
-        generated_ids_trimmed = [
-            out_ids[len(in_ids):]
-            for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-        ]
-
-        answer = processor.batch_decode(
-            generated_ids_trimmed,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=False
-        )[0]
-
-        # Clean up
-        del inputs, generated_ids
-        torch.cuda.empty_cache()
-
-        return answer
-
-    def similarity(a, b):
-        return SequenceMatcher(None, a.lower(), b.lower()).ratio()
-
-    # Evaluate
-    exact_matches = 0
-    similarities = []
-    results = []
-
-    for i in tqdm(range(len(val_data))):
-        sample = val_data[i]
-        image_path = os.path.join(IMAGE_FOLDER, sample["image"])
-        question = sample["conversations"][0]["value"].replace("<image>\n", "")
-        ground_truth = sample["conversations"][1]["value"]
-
-        try:
-            prediction = ask_question(image_path, question)
-
-            # Calculate metrics
-            is_exact = prediction.strip() == ground_truth.strip()
-            sim = similarity(prediction, ground_truth)
-
-            if is_exact:
-                exact_matches += 1
-            similarities.append(sim)
-
-            results.append({
-                "id": sample["id"],
-                "question": question,
-                "ground_truth": ground_truth,
-                "prediction": prediction,
-                "exact_match": is_exact,
-                "similarity": sim
-            })
-
-            # Print first 3 examples
-            if i < 3:
-                print(f"\n--- Example {i+1} ---")
-                print(f"Q: {question}")
-                print(f"GT: {ground_truth}")
-                print(f"Pred: {prediction}")
-                print(f"Similarity: {sim*100:.1f}%")
-
-        except Exception as e:
-            print(f"Error on sample {i}: {e}")
-            continue
-
-    # Calculate final metrics
-    num_evaluated = len(similarities)
-    exact_match_rate = exact_matches / num_evaluated * 100 if num_evaluated > 0 else 0
-    avg_similarity = sum(similarities) / num_evaluated * 100 if num_evaluated > 0 else 0
-
-    print(f"\n{'=' * 80}")
-    print("📊 Evaluation Results")
-    print(f"{'=' * 80}")
-    print(f"Checkpoint: {checkpoint_name}")
-    print(f"Samples evaluated: {num_evaluated}")
-    print(f"Exact Match: {exact_matches}/{num_evaluated} ({exact_match_rate:.2f}%)")
-    print(f"Avg Similarity: {avg_similarity:.2f}%")
-    print(f"{'=' * 80}")
-
-    # Save results
-    results_path = f"{CHECKPOINT_DIR}/eval_results_{checkpoint_name}.json"
-    with open(results_path, "w", encoding="utf-8") as f:
-        json.dump({
-            "checkpoint": checkpoint_name,
-            "num_samples": num_evaluated,
-            "exact_match": exact_match_rate,
-            "avg_similarity": avg_similarity,
-            "results": results[:20]  # Save first 20 detailed results
-        }, f, ensure_ascii=False, indent=2)
-    print(f"\n✓ Results saved to {results_path}")
-
+    model = VQAModel.from_pretrained(path, config, base_model_id=base_model)
+    result = evaluate(
+        model,
+        config,
+        split=split,
+        num_samples=num_samples,
+        condition=condition,
+        output_path=(
+            f"{CHECKPOINT_DIR}/eval_{os.path.basename(path)}_{split}_{condition}.json"
+        ),
+    )
     checkpoint_volume.commit()
+    # Vision seeding writes into the data volume; without this commit the
+    # cache is thrown away with the container and the next run pays for
+    # the same VLM calls again.
+    data_volume.commit()
 
-    return {
-        "checkpoint": checkpoint_name,
-        "num_samples": num_evaluated,
-        "exact_match": exact_match_rate,
-        "avg_similarity": avg_similarity,
-    }
+    print(format_scores(result))
+    return {"checkpoint": os.path.basename(path), "condition": condition, **result["metrics"]}
 
 
-# ============================================
-# Step 4: Interactive Demo
-# ============================================
+
+# --------------------------------------------------------------------------
+# Smoke tests
+#
+# Four levels, cheapest first, each with its own short timeout rather than
+# borrowing the 24-hour training function's. A smoke test that can hang
+# for a day is not a smoke test — the point is to find out quickly, and a
+# level that fails tells you where without having paid for the levels
+# above it.
+# --------------------------------------------------------------------------
+
+
+@app.function(image=image, timeout=600)
+def smoke_import():
+    """Level 1 — the image is built correctly. No GPU, no data, no model.
+
+    Catches the failures that need nothing else present: a package that
+    did not ship, a PYTHONPATH that does not include it, a config that
+    does not parse, a graph module that cannot be imported.
+    """
+    import sys
+
+    print(f"python: {sys.version.split()[0]}")
+    print(f"PYTHONPATH: {os.environ.get('PYTHONPATH')}")
+
+    import fvqa
+    from fvqa.data.fvqa_graph import KnowledgeGraph
+    from fvqa.evaluation.conditions import CONDITIONS
+    from fvqa.retrieval import GraphRetriever
+
+    print(f"fvqa imported from {fvqa.__file__}")
+
+    config = _load()
+    print(f"config: project={config.project_name} model={config.model.model_id}")
+    print(f"conditions: {list(CONDITIONS)}")
+
+    # A three-triple graph: proves the traversal code runs here, without
+    # waiting on the 451MB download the next level does.
+    graph = KnowledgeGraph(
+        {
+            "f1": {
+                "KB": "conceptnet", "e1": "trumpet", "e2": "jazz club",
+                "e1_label": "trumpet", "e2_label": "jazz club",
+                "r": "/r/AtLocation", "surface": "[[trumpet]] in [[jazz club]]",
+            }
+        }
+    )
+    retriever = GraphRetriever(graph)
+    result = retriever.retrieve(["trumpet"], "Where?", max_hops=1)
+    assert result.status == "ok", result.status
+    print(f"mini-graph retrieval: {result.status}, {len(result.facts)} fact(s)")
+
+    return {"level": 1, "ok": True, "conditions": list(CONDITIONS)}
+
+
+@app.function(image=image, volumes={DATA_DIR: data_volume}, timeout=1800, memory=8192)
+def smoke_prepare(limit: int = 40):
+    """Level 2 — the dataset downloads, parses and splits. Still no GPU.
+
+    `--limit` keeps this quick, which means the val split can come out
+    tiny or empty: splitting happens per *image*, so a small slice of
+    questions may put every image on one side. That is expected here —
+    this level checks the files are written and well-formed, and is not a
+    place to read anything into the split sizes.
+    """
+    import json
+
+    from fvqa.data.fvqa import prepare_fvqa
+
+    config = _load()
+    _ensure_fvqa_downloaded(config.data.root)
+    counts = prepare_fvqa(config, limit=limit)
+    data_volume.commit()
+
+    written = {}
+    for split in ("train", "val", "test"):
+        path = config.data.split_file(split)
+        if not os.path.exists(path):
+            written[split] = None
+            continue
+        with open(path, encoding="utf-8") as handle:
+            samples = json.load(handle)
+        written[split] = len(samples)
+        if samples:
+            sample = samples[0]
+            missing = [
+                key for key in ("id", "image", "conversations", "fvqa_question")
+                if key not in sample
+            ]
+            assert not missing, f"{split}.json sample is missing {missing}"
+
+    print(f"counts: {counts}")
+    print(f"written: {written}")
+    return {"level": 2, "ok": True, "counts": counts, "written": written}
+
+
 @app.function(
     image=image,
     gpu="A100",
-    volumes={
-        DATA_DIR: data_volume,
-        CHECKPOINT_DIR: checkpoint_volume,
-    },
-    timeout=3600,
+    volumes=VOLUMES,
+    secrets=[HF_SECRET],
+    timeout=1800,
+    memory=32768,
 )
-def demo(
-    image_path: str,
-    question: str,
-    checkpoint_name: str = "checkpoint-best",
-):
+def smoke_baseline(num_samples: int = 3, condition: str = "no-context"):
+    """Level 3 — the base model loads on a GPU and generates. No training.
+
+    The first level that costs GPU time, and the last one that can fail
+    for reasons unrelated to training: weights that will not download,
+    an attention implementation that is not available, a processor that
+    rejects the images.
     """
-    Run inference on a single image.
-    
-    Args:
-        image_path: Path to image file (local or URL)
-        question: Question to ask about the image
-        checkpoint_name: Name of checkpoint to use
-    """
-    import torch
-    from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
-    from qwen_vl_utils import process_vision_info
+    from fvqa.evaluation.runner import evaluate, format_scores
+    from fvqa.model import VQAModel
 
-    # Find checkpoint
-    checkpoint_base = f"{CHECKPOINT_DIR}/qwen3vl-vivqa"
-    
-    if checkpoint_name == "checkpoint-best":
-        checkpoints = sorted([
-            d for d in os.listdir(checkpoint_base) 
-            if d.startswith("checkpoint-")
-        ])
-        checkpoint_name = checkpoints[-1] if checkpoints else None
-        if not checkpoint_name:
-            raise FileNotFoundError("No checkpoints found!")
+    _login()
+    config = _load()
 
-    checkpoint_path = os.path.join(checkpoint_base, checkpoint_name)
-
-    print(f"Loading model from {checkpoint_path}...")
-    model = Qwen2VLForConditionalGeneration.from_pretrained(
-        checkpoint_path,
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
+    model = VQAModel.from_pretrained(config.model.model_id, config)
+    result = evaluate(
+        model, config, split="train", num_samples=num_samples, condition=condition
     )
-    processor = AutoProcessor.from_pretrained(checkpoint_path)
+    data_volume.commit()
 
-    # Prepare message
-    messages = [{
-        "role": "user",
-        "content": [
-            {"type": "image", "image": image_path},
-            {"type": "text", "text": question}
-        ]
-    }]
-
-    text = processor.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True
-    )
-
-    image_inputs, video_inputs = process_vision_info(messages)
-
-    inputs = processor(
-        text=[text],
-        images=image_inputs,
-        videos=video_inputs,
-        padding=True,
-        return_tensors="pt"
-    ).to(model.device)
-
-    with torch.inference_mode():
-        generated_ids = model.generate(
-            **inputs,
-            max_new_tokens=512,
-            temperature=0.7,
-            top_p=0.9,
-            do_sample=True,
-        )
-
-    generated_ids_trimmed = [
-        out_ids[len(in_ids):]
-        for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-    ]
-
-    answer = processor.batch_decode(
-        generated_ids_trimmed,
-        skip_special_tokens=True,
-        clean_up_tokenization_spaces=False
-    )[0]
-
-    print(f"\n{'=' * 60}")
-    print(f"📸 Image: {image_path}")
-    print(f"❓ Question: {question}")
-    print(f"💬 Answer: {answer}")
-    print(f"{'=' * 60}")
-
-    return {"question": question, "answer": answer}
+    print(format_scores(result))
+    assert result["num_samples"] > 0, "no sample generated successfully"
+    return {
+        "level": 3,
+        "ok": True,
+        "condition": condition,
+        "scored": result["num_samples"],
+        "failed": result["num_failed"],
+        "sample_prediction": result["predictions"][0]["prediction"] if result["predictions"] else None,
+    }
 
 
-# ============================================
-# Step 5: Download Checkpoint
-# ============================================
 @app.function(
     image=image,
-    volumes={CHECKPOINT_DIR: checkpoint_volume},
-    timeout=1800,
+    gpu="A100",
+    volumes=VOLUMES,
+    secrets=[HF_SECRET],
+    timeout=3600,
+    memory=32768,
 )
-def download_checkpoint(checkpoint_name: str = "checkpoint-best"):
+def smoke_train(max_steps: int = 2):
+    """Level 4 — two optimizer steps, then reload what they wrote.
+
+    The reload is the half that matters. Training writing *a* directory
+    proves little; the failure this catches is an adapter checkpoint that
+    cannot be loaded back — which is invisible until someone tries to
+    evaluate a real run days later.
     """
-    Download a checkpoint as a zip file.
-    
-    Args:
-        checkpoint_name: Name of checkpoint to download
-    """
-    import subprocess
-    import shutil
+    from fvqa.checkpoint import inspect_checkpoint
+    from fvqa.evaluation.runner import evaluate
+    from fvqa.model import VQAModel
+    from fvqa.train.command import latest_checkpoint
+    from fvqa.train.runner import run_training
 
-    checkpoint_base = f"{CHECKPOINT_DIR}/qwen3vl-vivqa"
-    
-    if checkpoint_name == "checkpoint-best":
-        checkpoints = sorted([
-            d for d in os.listdir(checkpoint_base) 
-            if d.startswith("checkpoint-")
-        ])
-        checkpoint_name = checkpoints[-1] if checkpoints else None
+    _login()
 
-    checkpoint_path = os.path.join(checkpoint_base, checkpoint_name)
-    
-    if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-
-    # Create zip file
-    zip_path = f"/tmp/{checkpoint_name}.zip"
-    print(f"Creating zip archive: {zip_path}")
-    
-    shutil.make_archive(
-        zip_path.replace(".zip", ""),
-        "zip",
-        checkpoint_base,
-        checkpoint_name
+    output_dir = f"{CHECKPOINT_DIR}/smoke"
+    config = _load(
+        [
+            f"training.output_dir={output_dir}",
+            f"training.max_steps={max_steps}",
+            "training.save_steps=1",
+            "training.eval_strategy=no",
+            "training.load_best_model_at_end=false",
+            "training.logging_steps=1",
+        ]
     )
 
-    # Read and return zip content
-    with open(zip_path, "rb") as f:
-        content = f.read()
+    exit_code = run_training(
+        config, trainer_dir="/root/Qwen-VL-Series-Finetune", num_gpus=1, resume=False
+    )
+    checkpoint_volume.commit()
+    assert exit_code == 0, f"training exited with {exit_code}"
 
-    print(f"✓ Checkpoint ready for download: {len(content) / 1e6:.2f} MB")
-    
-    return content
+    checkpoint = latest_checkpoint(output_dir)
+    assert checkpoint, f"training wrote no checkpoint under {output_dir}"
+
+    info = inspect_checkpoint(checkpoint)
+    print(f"checkpoint {checkpoint} detected as: {info.kind}")
+    print(f"  base model:       {info.base_model_id}")
+    print(f"  non-LoRA weights: {info.non_lora_path}")
+
+    model = VQAModel.from_pretrained(checkpoint, config)
+    result = evaluate(model, config, split="train", num_samples=1, condition="stored")
+    assert result["num_samples"] > 0, "reloaded checkpoint generated nothing"
+
+    return {
+        "level": 4,
+        "ok": True,
+        "checkpoint": os.path.basename(checkpoint),
+        "kind": info.kind,
+        "base_model": info.base_model_id,
+        "has_non_lora_weights": info.non_lora_path is not None,
+        "prediction": result["predictions"][0]["prediction"],
+    }
 
 
-# ============================================
-# Main Entry Point
-# ============================================
+@app.function(image=image, volumes=VOLUMES)
+def check_status():
+    """Report what is on the volumes."""
+    import json
+
+    config = _load()
+    status: dict[str, object] = {}
+
+    for split in ("train", "val", "test"):
+        path = config.data.split_file(split)
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as handle:
+                status[split] = len(json.load(handle))
+
+    if os.path.isdir(config.data.image_folder):
+        status["images"] = len(os.listdir(config.data.image_folder))
+
+    output_dir = config.training.output_dir
+    if os.path.isdir(output_dir):
+        status["checkpoints"] = sorted(
+            entry for entry in os.listdir(output_dir) if entry.startswith("checkpoint-")
+        )
+
+    print(json.dumps(status, indent=2))
+    return status
+
+
 @app.local_entrypoint()
 def main(
     step: str = "all",
-    num_epochs: int = 2,
-    batch_size: int = 1,
-    grad_accum: int = 16,
-    num_eval: int = 100,
+    num_epochs: int = 0,
+    num_eval: int = 200,
+    grounding: bool = False,
+    limit: int = 0,
+    baseline: bool = False,
+    condition: str = "stored",
+    smoke_level: int = 4,
 ):
-    """
-    Run the full training pipeline.
-    
+    """Run the pipeline.
+
     Args:
-        step: Which step to run ("prepare", "train", "evaluate", "all")
-        num_epochs: Number of training epochs
-        batch_size: Per-device batch size
-        grad_accum: Gradient accumulation steps
-        num_eval: Number of samples to evaluate
-    
-    Examples:
-        modal run scripts/train_on_modal.py --step prepare
-        modal run scripts/train_on_modal.py --step train --num-epochs 2
-        modal run scripts/train_on_modal.py --step evaluate --num-eval 100
-        modal run scripts/train_on_modal.py --step all
+        step: smoke | prepare | train | evaluate | baseline | all
+        num_epochs: 0 to use the value in config.yaml
+        num_eval: samples to score; -1 for the whole split
+        grounding: prepare the data with oracle-fact grounding enabled
+        limit: process at most this many questions; 0 for all
+        baseline: score the un-finetuned base model instead of a checkpoint
+        condition: prompt condition for evaluation
+        smoke_level: highest smoke level to run (1-4)
+
+    Scoring the base model needs no training at all:
+        modal run scripts/train_on_modal.py --step baseline
     """
-    print("=" * 80)
-    print("🚀 Vi-VQA Training Pipeline on Modal")
-    print("=" * 80)
+    valid = {"smoke", "prepare", "train", "evaluate", "baseline", "all"}
+    if step not in valid:
+        raise SystemExit(f"--step must be one of {sorted(valid)}, got {step!r}")
 
-    if step in ["prepare", "all"]:
-        print("\n📦 Step 1: Preparing dataset...")
-        result = prepare_dataset.remote()
-        print(f"   Result: {result}")
+    if step == "smoke":
+        # Cheapest first, and stop at the first failure: a level that
+        # fails makes every level above it uninformative.
+        levels = [
+            (1, "import + config + mini-graph (no GPU)", smoke_import),
+            (2, "download + prepare (no GPU)", smoke_prepare),
+            (3, "base model loads and generates (GPU)", smoke_baseline),
+            (4, "2 training steps + adapter reload (GPU)", smoke_train),
+        ]
+        if not 1 <= smoke_level <= len(levels):
+            # Falling through with nothing to run would print the success
+            # line having tested nothing at all.
+            raise SystemExit(
+                f"--smoke-level must be between 1 and {len(levels)}, got {smoke_level}"
+            )
 
-    if step in ["train", "all"]:
-        print("\n🎯 Step 2: Training model...")
-        result = train_model.remote(
-            num_epochs=num_epochs,
-            batch_size=batch_size,
-            grad_accum=grad_accum,
+        for number, description, function in levels:
+            if number > smoke_level:
+                break
+            print(f"\n🔥 smoke {number}/{smoke_level}: {description}")
+            # smoke_prepare is the only level that takes the shared
+            # --limit; the others have their own sensible smoke defaults.
+            if function is smoke_prepare and limit:
+                print(function.remote(limit=limit))
+            else:
+                print(function.remote())
+        print(f"\n✅ smoke levels 1-{smoke_level} passed")
+        return
+
+    if step in ("prepare", "all"):
+        print("\n📦 preparing dataset")
+        print(prepare_dataset.remote(limit=limit or None, grounding=grounding))
+
+    if step in ("train", "all"):
+        print("\n🎯 training")
+        print(train_model.remote(num_epochs=num_epochs or None))
+
+    if step == "baseline" or baseline:
+        print("\n📊 scoring the base model (no fine-tuning)")
+        config_model_id = "Qwen/Qwen3-VL-8B-Instruct"
+        print(
+            evaluate_model.remote(
+                model_path=config_model_id, num_samples=num_eval, condition=condition
+            )
         )
-        print(f"   Result: {result}")
-
-    if step in ["evaluate", "all"]:
-        print("\n📊 Step 3: Evaluating model...")
-        result = evaluate_model.remote(num_samples=num_eval)
-        print(f"   Result: {result}")
-
-    print("\n" + "=" * 80)
-    print("🎉 Pipeline complete!")
-    print("=" * 80)
-
-
-# ============================================
-# Utility Functions
-# ============================================
-@app.function(
-    volumes={
-        DATA_DIR: data_volume,
-        CHECKPOINT_DIR: checkpoint_volume,
-    },
-)
-def check_status():
-    """Check the status of data and checkpoints."""
-    import json
-
-    status = {"data": {}, "checkpoints": {}}
-
-    # Check data
-    train_path = f"{DATA_DIR}/train.json"
-    val_path = f"{DATA_DIR}/val.json"
-    
-    if os.path.exists(train_path):
-        with open(train_path, 'r') as f:
-            status["data"]["train"] = len(json.load(f))
-    
-    if os.path.exists(val_path):
-        with open(val_path, 'r') as f:
-            status["data"]["val"] = len(json.load(f))
-
-    if os.path.exists(IMAGE_FOLDER):
-        status["data"]["images"] = len(os.listdir(IMAGE_FOLDER))
-
-    # Check checkpoints
-    checkpoint_base = f"{CHECKPOINT_DIR}/qwen3vl-vivqa"
-    if os.path.exists(checkpoint_base):
-        checkpoints = sorted([
-            d for d in os.listdir(checkpoint_base) 
-            if d.startswith("checkpoint-")
-        ])
-        status["checkpoints"]["available"] = checkpoints
-
-    print("\n📊 Status:")
-    print(f"   Data: {status['data']}")
-    print(f"   Checkpoints: {status['checkpoints']}")
-
-    return status
+    elif step in ("evaluate", "all"):
+        print("\n📊 evaluating")
+        print(evaluate_model.remote(num_samples=num_eval, condition=condition))

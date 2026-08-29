@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fvqa"
+version = "0.2.0"
+description = "Fact-based Visual Question Answering with knowledge-graph traversal, on Qwen3-VL"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+# Core deps are deliberately light: the config, data-preparation and
+# evaluation layers must be importable (and testable) without CUDA,
+# torch or transformers installed.
+dependencies = [
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# `fvqa prepare` reads the local FVQA release directly (stdlib json/os) —
+# no dataset-download extra needed, unlike a HuggingFace-backed loader.
+#
+# Everything needed to run the model. transformers>=4.57 is a hard
+# requirement: Qwen3VLForConditionalGeneration does not exist before it.
+infer = [
+    "torch>=2.0.0",
+    "torchvision",
+    "transformers>=4.57.0",
+    "accelerate>=0.34.0",
+    "qwen-vl-utils>=0.0.8",
+    "peft>=0.13.0",
+]
+train = [
+    "fvqa[infer]",
+    "bitsandbytes>=0.44.0",
+    "deepspeed>=0.15.0",
+    "tensorboard",
+]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+fvqa = "fvqa.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["Qwen-VL-Series-Finetune"]
+
+[tool.ruff.lint]
+# Deliberately a small set. The point is to catch real defects — an
+# undefined name, an unused import, a mutable default — not to relitigate
+# formatting in review. E501 is off because the line-length limit above
+# already governs it and the formatter handles the rest.
+select = ["F", "E", "W", "I", "B", "UP"]
+ignore = [
+    "E501",   # line length: the formatter's job, not a review comment
+    "B008",   # function call in default arg: modal.Secret.from_name is fine here
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests deliberately import inside functions to keep the heavy imports out
+# of collection, and shadow builtins in fixtures.
+"tests/*" = ["B011"]
