@@ -49,6 +49,15 @@ image = (
         "qwen-vl-utils>=0.0.8",
         "pyyaml>=6.0",
         "tensorboard",
+        # Needed by the trainer, not by fvqa, and not obviously so:
+        # src/dataset/__init__.py imports the DPO and classification
+        # datasets alongside the SFT one, so an SFT run still has to
+        # import dpo_dataset -> ujson and dpo_dataset -> params -> trl.
+        # Both were missing until a real run hit them one at a time;
+        # smoke level 1 now checks the whole import graph instead. Floors
+        # match the trainer's own requirements.txt at the pinned commit.
+        "trl>=0.25.0",
+        "ujson>=5.10.0",
     )
     .env(
         {
@@ -64,6 +73,7 @@ image = (
     # Ship the package and config instead of duplicating their logic here.
     .add_local_dir(REPO_ROOT / "src", remote_path="/root/src")
     .add_local_dir(REPO_ROOT / "config", remote_path="/root/config")
+    .add_local_dir(REPO_ROOT / "scripts", remote_path="/root/scripts")
 )
 
 #: Loading a model needs the HuggingFace token. Every function that loads
@@ -344,7 +354,52 @@ def smoke_import():
     assert result.status == "ok", result.status
     print(f"mini-graph retrieval: {result.status}, {len(result.facts)} fact(s)")
 
-    return {"level": 1, "ok": True, "conditions": list(CONDITIONS)}
+    # The trainer's dependencies are part of "is the image built
+    # correctly", and checking them here costs a small git fetch and no
+    # GPU. Two packages (trl, ujson) were missing from the image and each
+    # surfaced separately, three minutes into a GPU container, because
+    # nothing checked until training actually reached the import.
+    trainer = _check_trainer_imports(config)
+
+    return {"level": 1, "ok": True, "conditions": list(CONDITIONS), "trainer": trainer}
+
+
+def _check_trainer_imports(config) -> dict[str, object]:
+    """Verify every package the trainer's entry point imports is installed."""
+    import sys
+
+    sys.path.insert(0, "/root/scripts")
+    from check_trainer_imports import third_party_imports  # type: ignore
+
+    from fvqa.train.runner import ensure_trainer_repo
+
+    repo = ensure_trainer_repo(
+        "/root/Qwen-VL-Series-Finetune",
+        url=config.trainer.repo_url,
+        revision=config.trainer.revision,
+    )
+
+    import importlib.util
+    from pathlib import Path
+
+    reached = third_party_imports(Path(repo) / "src", Path("train") / "train_sft.py")
+    missing = {
+        name: chain
+        for name, chain in reached.items()
+        if importlib.util.find_spec(name) is None
+    }
+
+    print(f"trainer imports: {len(reached)} package(s) reachable from train_sft.py")
+    if missing:
+        for name, chain in sorted(missing.items()):
+            print(f"  MISSING {name} — reached via {' -> '.join(chain)}")
+        raise RuntimeError(
+            f"the image is missing {sorted(missing)}, which the trainer imports. "
+            "Add them to the pip_install list in scripts/train_on_modal.py."
+        )
+
+    print(f"  all {len(reached)} present")
+    return {"checked": sorted(reached), "revision": config.trainer.revision[:12]}
 
 
 @app.function(image=image, volumes={DATA_DIR: data_volume}, timeout=1800, memory=8192)

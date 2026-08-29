@@ -370,7 +370,7 @@ Sửa luôn mấy chỗ Modal-specific dễ âm thầm hỏng:
 bắt lỗi thật — tên chưa định nghĩa, import thừa, mutable default — chứ
 không đem chuyện format ra review lại.
 
-## Hai bug chỉ chạy thật mới lộ ra
+## Ba bug chỉ chạy thật mới lộ ra
 
 Smoke test mức 4 trên GPU thật bắt được hai lỗi mà 347 test, ruff,
 `--dry-run` và `check_trainer_flags.py` đều không thể thấy. Cả hai đều
@@ -397,8 +397,33 @@ là chết ngay dòng import đầu tiên, sau khi deepspeed đã khởi động
 `trainer_env()` mới prepend (không ghi đè) — trên Modal `PYTHONPATH` đang
 mang thư mục chứa package `fvqa`, ghi đè sẽ đổi lỗi này lấy lỗi khác.
 
-Cả hai giờ có unit test. Bài học: `--dry-run` chứng minh được *lệnh đúng*,
-không chứng minh được *môi trường chạy đúng* — đó là việc của mức 4.
+**3. Image thiếu `trl` và `ujson`.**
+Danh sách dependency của trainer trong Modal image là do tôi **đoán tay**,
+không buộc vào thứ trainer thật sự import. Hai package thiếu, mỗi cái lộ ra
+một lần riêng, mỗi lần 3 phút GPU.
+
+Cả hai vào qua `src/dataset/__init__.py` — file này import **cả** DPO và
+classification dataset bên cạnh SFT, nên một run SFT vẫn phải import
+`dpo_dataset -> ujson` và `dpo_dataset -> params -> trl`. Đọc code đường
+SFT không thấy được; phải đi theo đồ thị import mới thấy.
+
+Sửa cả **pattern**, không chỉ hai package: `scripts/check_trainer_imports.py`
+đi đồ thị import từ `train_sft.py`, thu mọi package third-party rồi thử
+import từng cái. Nối vào **smoke mức 1** — không GPU, không data, chỉ tốn
+một git fetch nhỏ. Lỗi loại này giờ chết trong ~30 giây ở mức rẻ nhất thay
+vì 3 phút trong container GPU.
+
+Test cố định luôn tập dependency đã biết (9 package): nếu trainer ở revision
+pin bắt đầu import thêm thứ gì, đó là quyết định cần cân nhắc, không phải
+bất ngờ giữa run.
+
+Cả ba giờ có unit test. Hai bài học:
+
+- `--dry-run` chứng minh được *lệnh đúng*, không chứng minh được *môi trường
+  chạy đúng*.
+- Sửa từng `ModuleNotFoundError` một là vòng lặp không có điểm dừng. Phải
+  hỏi "cái gì đảm bảo danh sách này đúng?" — câu trả lời là đồ thị import,
+  không phải trí nhớ.
 
 ## Còn lại — đều cần GPU
 
