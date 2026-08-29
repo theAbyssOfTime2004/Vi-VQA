@@ -401,7 +401,10 @@ class TrainingConfig:
     lazy_preprocess: bool = True
 
     freeze_vision_tower: bool = True
-    freeze_llm: bool = False
+    # True because the default tuning_method is lora, and LoRA trains
+    # adapters on top of a frozen LLM — the trainer rejects the pair
+    # outright. Set false only alongside tuning_method: full.
+    freeze_llm: bool = True
     freeze_merger: bool = False
 
     save_strategy: str = "steps"
@@ -431,8 +434,6 @@ class TrainingConfig:
         for name in ("per_device_train_batch_size", "gradient_accumulation_steps"):
             if getattr(self, name) < 1:
                 raise ConfigError(f"{path}.{name} must be at least 1")
-        if self.freeze_llm and self.freeze_vision_tower and self.freeze_merger:
-            raise ConfigError(f"{path}: every component is frozen, nothing would train")
         if self.warmup_steps < 0:
             raise ConfigError(
                 f"{path}.warmup_steps must be non-negative, got {self.warmup_steps}"
@@ -511,6 +512,53 @@ class Config:
         self.training.validate("training")
         self.inference.validate("inference")
         self.evaluation.validate("evaluation")
+        self._validate_tuning_combination()
+
+    def _validate_tuning_combination(self) -> None:
+        """Rules spanning `model` and `training`, checked before a GPU is.
+
+        The first three mirror what `2U1/Qwen-VL-Series-Finetune`'s
+        `train_sft.py` asserts right after parsing its arguments. It
+        raises those several minutes into a run, once deepspeed has
+        started; there is no reason not to know at `fvqa config` time
+        instead. Each is a genuine contradiction rather than a
+        preference, so rejecting them loses nothing.
+        """
+        model, training = self.model, self.training
+
+        if model.uses_lora and not training.freeze_llm:
+            raise ConfigError(
+                "training.freeze_llm must be true when model.tuning_method is "
+                f"{model.tuning_method!r}: LoRA trains adapters on top of frozen "
+                "base weights, so training the LLM itself as well is a "
+                "contradiction the trainer rejects outright."
+            )
+
+        if not model.uses_lora and model.lora.vision_lora:
+            raise ConfigError(
+                "model.lora.vision_lora requires an adapter to attach to, but "
+                f"model.tuning_method is {model.tuning_method!r}."
+            )
+
+        if model.lora.vision_lora and not training.freeze_vision_tower:
+            raise ConfigError(
+                "training.freeze_vision_tower must be true when "
+                "model.lora.vision_lora is true, for the same reason as "
+                "freeze_llm: the adapter replaces training the tower directly."
+            )
+
+        # Under LoRA the adapters still train with every component frozen,
+        # so this is only a contradiction for full fine-tuning.
+        if (
+            not model.uses_lora
+            and training.freeze_llm
+            and training.freeze_vision_tower
+            and training.freeze_merger
+        ):
+            raise ConfigError(
+                "every component is frozen and model.tuning_method is 'full', "
+                "so nothing would train"
+            )
 
     def as_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)

@@ -148,8 +148,11 @@ training:
   dataloader_num_workers: 4
   lazy_preprocess: true
 
+  # With tuning_method: lora the LLM must be frozen — the adapters are what
+  # train, and the trainer rejects "LoRA plus a trainable LLM" outright.
+  # Set freeze_llm: false only alongside tuning_method: full.
   freeze_vision_tower: true
-  freeze_llm: false
+  freeze_llm: true
   freeze_merger: false
 
   save_strategy: "steps"

@@ -370,7 +370,7 @@ Sửa luôn mấy chỗ Modal-specific dễ âm thầm hỏng:
 bắt lỗi thật — tên chưa định nghĩa, import thừa, mutable default — chứ
 không đem chuyện format ra review lại.
 
-## Bốn bug chỉ chạy thật mới lộ ra
+## Năm bug chỉ chạy thật mới lộ ra
 
 Smoke test mức 4 trên GPU thật bắt được hai lỗi mà 347 test, ruff,
 `--dry-run` và `check_trainer_flags.py` đều không thể thấy. Cả hai đều
@@ -439,7 +439,32 @@ chạy được hai bên.
 Kiểm tra flag giờ chạy luôn ở **smoke mức 1** — image có transformers nên
 đối chiếu là chính xác, và không tốn GPU.
 
-Cả bốn giờ có unit test. Hai bài học:
+**5. `freeze_llm: false` mâu thuẫn với `tuning_method: lora`.**
+Trainer raise: *"If `lora_enable` is True, `freeze_llm` must also be True."*
+Đúng về mặt ngữ nghĩa — LoRA train adapter trên nền weight đóng băng; vừa
+LoRA vừa train thẳng LLM là mâu thuẫn.
+
+Đây là loại lỗi `check_trainer_flags.py` **không thể** bắt: nó đối chiếu
+*tên* flag, không đối chiếu *ràng buộc giữa các field*.
+
+Nên lần này đọc hết mọi `raise`/`assert` trong `train_sft.py` một lượt thay
+vì chờ từng cái, được 3 ràng buộc áp dụng cho ta, và đưa cả 3 vào
+`Config.validate()`:
+
+```
+lora_enable=True   -> freeze_llm phải True
+lora_enable=False  -> vision_lora phải False
+vision_lora=True   -> freeze_vision_tower phải True
+```
+
+Giờ sai là chết ngay ở `fvqa config` — vài giây, không GPU — thay vì vài
+phút trong container A100.
+
+Nhân đó phát hiện check cũ *"every component is frozen, nothing would
+train"* cũng sai: dưới LoRA thì adapter vẫn train, nên đóng băng cả ba
+không hề mâu thuẫn. Check đó giờ chỉ áp dụng cho `tuning_method: full`.
+
+Cả năm giờ có unit test. Ba bài học:
 
 - `--dry-run` chứng minh được *lệnh đúng*, không chứng minh được *môi trường
   chạy đúng*.
@@ -448,6 +473,9 @@ Cả bốn giờ có unit test. Hai bài học:
   và field thật của thư viện đã cài, không phải trí nhớ.
 - **Một cái check dựa trên danh sách cứng còn tệ hơn không có check**, vì
   nó báo xanh. Bug 4 sống sót qua đúng cái script viết ra để bắt nó.
+- Đối chiếu *tên* không đối chiếu được *ngữ nghĩa*. Ràng buộc giữa các
+  field cần đọc từ `raise`/`assert` của upstream và encode lại — bug 5
+  không có cách nào lộ ra từ việc kiểm tra tên flag.
 
 Cả bốn lỗi giờ bị bắt ở **mức 1** — không GPU, không data, dưới một phút.
 

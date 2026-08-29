@@ -81,7 +81,14 @@ def test_missing_file_is_reported(tmp_path):
         ({"inference": {"top_p": 1.5}}, "top_p"),
         ({"evaluation": {"metrics": ["meteor"]}}, "unknown metric"),
         (
-            {"training": {"freeze_llm": True, "freeze_vision_tower": True, "freeze_merger": True}},
+            {
+                "model": {"tuning_method": "full"},
+                "training": {
+                    "freeze_llm": True,
+                    "freeze_vision_tower": True,
+                    "freeze_merger": True,
+                },
+            },
             "nothing would train",
         ),
         ({"model": {"tuning_method": "adapter"}}, "tuning_method"),
@@ -221,3 +228,65 @@ class TestYamlBooleanAliases:
         assert config.training.max_steps == 2
         assert config.training.eval_strategy == "no"
         assert config.training.load_best_model_at_end is False
+
+
+class TestTunerConstraints:
+    """Rules the trainer enforces, checked before a GPU is involved.
+
+    `train_sft.py` asserts these right after parsing its arguments and
+    raises minutes into a run, once deepspeed has started. Each is a real
+    contradiction, so there is nothing lost by rejecting it at load time —
+    and a config error at `fvqa config` costs seconds instead of an A100
+    container.
+    """
+
+    def test_lora_requires_a_frozen_llm(self):
+        # The exact combination that died on a real GPU run.
+        config = Config()
+        config.model.tuning_method = "lora"
+        config.training.freeze_llm = False
+        with pytest.raises(ConfigError, match="freeze_llm must be true"):
+            config.validate()
+
+    def test_qlora_requires_a_frozen_llm_too(self):
+        config = Config()
+        config.model.tuning_method = "qlora"
+        config.training.freeze_llm = False
+        with pytest.raises(ConfigError, match="freeze_llm must be true"):
+            config.validate()
+
+    def test_full_tuning_may_train_the_llm(self):
+        config = Config()
+        config.model.tuning_method = "full"
+        config.training.freeze_llm = False
+        config.validate()
+
+    def test_vision_lora_needs_an_adapter_to_attach_to(self):
+        config = Config()
+        config.model.tuning_method = "full"
+        config.model.lora.vision_lora = True
+        with pytest.raises(ConfigError, match="vision_lora requires an adapter"):
+            config.validate()
+
+    def test_vision_lora_requires_a_frozen_vision_tower(self):
+        config = Config()
+        config.model.tuning_method = "lora"
+        config.model.lora.vision_lora = True
+        config.training.freeze_vision_tower = False
+        with pytest.raises(ConfigError, match="freeze_vision_tower must be true"):
+            config.validate()
+
+    def test_everything_frozen_is_fine_under_lora(self):
+        # The adapters still train, so this is not a contradiction — the
+        # "nothing would train" rule applies to full fine-tuning only.
+        config = Config()
+        config.model.tuning_method = "lora"
+        config.training.freeze_llm = True
+        config.training.freeze_vision_tower = True
+        config.training.freeze_merger = True
+        config.validate()
+
+    def test_the_shipped_config_satisfies_all_of_them(self, repo_config):
+        # config.yaml had freeze_llm: false with tuning_method: lora, which
+        # is what reached the GPU.
+        load_config(repo_config).validate()
