@@ -6,11 +6,12 @@ import logging
 import os
 import shutil
 import subprocess
+from collections.abc import Mapping
 
 from fvqa.config import Config
 from fvqa.train.command import REPO_URL, TRAIN_ENTRYPOINT, build_train_command, format_command
 
-__all__ = ["ensure_trainer_repo", "run_training"]
+__all__ = ["ensure_trainer_repo", "run_training", "trainer_env"]
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,29 @@ def ensure_trainer_repo(dest: str, url: str = REPO_URL, revision: str | None = N
     return dest
 
 
+def trainer_env(repo: str, base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment `src/train/train_sft.py` needs to be importable.
+
+    The trainer's entry point imports `model`, `trainer`, `dataset` and
+    `params` as top-level packages, which only resolve with its own
+    `src/` on `PYTHONPATH` — every one of its `scripts/*.sh` starts with
+    `export PYTHONPATH=src:$PYTHONPATH` for exactly this reason. Running
+    the entry point without it fails immediately with
+    "ModuleNotFoundError: No module named 'model'".
+
+    Prepended rather than assigned: on Modal, `PYTHONPATH` already
+    carries the directory holding the `fvqa` package, and overwriting it
+    would trade this failure for a different one.
+    """
+    environment = dict(os.environ if base is None else base)
+    trainer_src = os.path.join(repo, "src")
+    existing = environment.get("PYTHONPATH", "")
+    environment["PYTHONPATH"] = (
+        f"{trainer_src}{os.pathsep}{existing}" if existing else trainer_src
+    )
+    return environment
+
+
 def run_training(
     config: Config,
     *,
@@ -136,7 +160,7 @@ def run_training(
     if dry_run:
         return 0
 
-    result = subprocess.run(command, cwd=repo)
+    result = subprocess.run(command, cwd=repo, env=trainer_env(repo))
     if result.returncode != 0:
         logger.error("training exited with code %d", result.returncode)
     return result.returncode

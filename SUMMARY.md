@@ -370,6 +370,36 @@ Sửa luôn mấy chỗ Modal-specific dễ âm thầm hỏng:
 bắt lỗi thật — tên chưa định nghĩa, import thừa, mutable default — chứ
 không đem chuyện format ra review lại.
 
+## Hai bug chỉ chạy thật mới lộ ra
+
+Smoke test mức 4 trên GPU thật bắt được hai lỗi mà 347 test, ruff,
+`--dry-run` và `check_trainer_flags.py` đều không thể thấy. Cả hai đều
+chết trong ~3 phút, **trước khi** tải 16GB weight hay train bước nào.
+
+**1. `--set training.eval_strategy=no` ra boolean `False`.**
+YAML 1.1 resolve `no` thành False. Mà `eval_strategy`/`save_strategy` của
+HuggingFace nhận **chuỗi** `"no"`. Cả `scripts/smoke_gpu.sh` lẫn
+`smoke_train` trên Modal đều truyền đúng cái đó, nên đường local cũng sẽ
+chết y hệt.
+
+Sửa ở loader chứ không quote lại ở chỗ gọi: config giờ dùng `SafeLoader`
+đã gỡ alias `yes`/`no`/`on`/`off` — đúng thứ YAML 1.2 đã làm, vì đúng lý
+do này. Quote ở hai chỗ gọi thì sửa được hôm nay và để nguyên bẫy cho lần
+sau ai gõ `--set training.eval_strategy=no`.
+
+**2. `run_training` không set `PYTHONPATH`.**
+`train_sft.py` import `model`, `trainer`, `dataset`, `params` như package
+top-level — chỉ resolve được khi có `src/` của trainer trên `PYTHONPATH`.
+**Cả 8 script `scripts/*.sh` của trainer đều mở đầu bằng
+`export PYTHONPATH=src:$PYTHONPATH`**, còn `run_training` thì không. Chạy
+là chết ngay dòng import đầu tiên, sau khi deepspeed đã khởi động.
+
+`trainer_env()` mới prepend (không ghi đè) — trên Modal `PYTHONPATH` đang
+mang thư mục chứa package `fvqa`, ghi đè sẽ đổi lỗi này lấy lỗi khác.
+
+Cả hai giờ có unit test. Bài học: `--dry-run` chứng minh được *lệnh đúng*,
+không chứng minh được *môi trường chạy đúng* — đó là việc của mức 4.
+
 ## Còn lại — đều cần GPU
 
 Cả 4 milestone đã xong. Mọi thứ còn lại đều là **chạy thật**, không phải
