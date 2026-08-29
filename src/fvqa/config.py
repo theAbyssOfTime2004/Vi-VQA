@@ -16,9 +16,10 @@ import functools
 import os
 import types
 import typing
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import yaml
 
@@ -530,7 +531,7 @@ def _coerce(value: Any, target: Any, path: str) -> Any:
     return value
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _hints(cls: type) -> dict[str, Any]:
     """Resolved type hints for a dataclass.
 
@@ -634,7 +635,7 @@ def load_config(
     if not config_path.is_file():
         raise ConfigError(f"config file not found: {config_path}")
 
-    with open(config_path, "r", encoding="utf-8") as handle:
+    with open(config_path, encoding="utf-8") as handle:
         raw = yaml.safe_load(handle)
 
     if raw is None:

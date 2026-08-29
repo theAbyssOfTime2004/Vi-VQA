@@ -24,8 +24,9 @@ from __future__ import annotations
 import json
 import logging
 from collections import deque
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any
 
 __all__ = ["Triple", "KnowledgeGraph"]
 
@@ -104,8 +105,8 @@ class KnowledgeGraph:
                 self._labels.setdefault(triple.e2_label.lower(), set()).add(triple.e2)
 
     @classmethod
-    def from_facts_file(cls, path: str) -> "KnowledgeGraph":
-        with open(path, "r", encoding="utf-8") as handle:
+    def from_facts_file(cls, path: str) -> KnowledgeGraph:
+        with open(path, encoding="utf-8") as handle:
             return cls(json.load(handle))
 
     def __len__(self) -> int:

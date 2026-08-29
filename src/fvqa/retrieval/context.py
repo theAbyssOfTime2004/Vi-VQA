@@ -14,7 +14,7 @@ that also differ in prompt shape would not be one.
 
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
 
 from fvqa.retrieval.types import RetrievedFact
 

@@ -21,8 +21,9 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from typing import Any, Mapping
+from typing import Any
 
 from fvqa.config import Config
 from fvqa.data.grounding import apply_grounding

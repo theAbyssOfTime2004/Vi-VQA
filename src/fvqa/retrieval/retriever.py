@@ -20,8 +20,9 @@ taken out of the picture entirely.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import replace
-from typing import Any, Sequence
+from typing import Any
 
 from fvqa.data.fvqa_graph import KnowledgeGraph
 from fvqa.retrieval.ranker import Ranker, build_ranker
@@ -118,7 +119,7 @@ class GraphRetriever:
         self.ranker = ranker or build_ranker("lexical")
 
     @classmethod
-    def from_config(cls, graph: KnowledgeGraph, config: Any) -> "GraphRetriever":
+    def from_config(cls, graph: KnowledgeGraph, config: Any) -> GraphRetriever:
         """Build a retriever using `config.retrieval.ranking_method`."""
         return cls(graph, ranker=build_ranker(config.retrieval.ranking_method))
 

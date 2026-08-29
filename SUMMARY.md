@@ -325,6 +325,43 @@ thật sẽ tệ hơn):
 không dùng được fact mà retrieval chưa từng đưa cho nó. Cột metric trong
 lần chạy này vô nghĩa (stub luôn trả "trumpet"); cột recall mới là kết quả.
 
+### M4 — PR7: Modal smoke pipeline + ruff (xong)
+
+`modal run scripts/train_on_modal.py --step smoke [--smoke-level N]` —
+4 mức, rẻ trước, **dừng ở mức đầu tiên fail** (mức fail làm mọi mức trên
+nó vô nghĩa). Mỗi mức có timeout riêng ngắn, không mượn timeout 24h của
+hàm train: smoke test treo được một ngày thì không còn là smoke test.
+
+| mức | kiểm tra | GPU | timeout |
+|---|---|---|---|
+| 1 | import + config + mini-graph | không | 10 phút |
+| 2 | tải + prepare + kiểm tra format split | không | 30 phút |
+| 3 | base model load + generate | có | 30 phút |
+| 4 | 2 optimizer step + **reload lại adapter** | có | 60 phút |
+
+Mức 4 quan trọng ở nửa sau: train ghi ra *một* thư mục thì chứng minh
+được rất ít; lỗi thật sự cần bắt là adapter checkpoint **không load lại
+được** — thứ chỉ lộ ra khi ai đó eval một run thật vài ngày sau.
+
+Sửa luôn mấy chỗ Modal-specific dễ âm thầm hỏng:
+
+- `PYTHONPATH=/root/src` tường minh, thay vì trông chờ working directory
+  tình cờ import được `fvqa`.
+- `secrets=[HF_SECRET]` gắn cho **cả** `evaluate_model` và các smoke mức
+  3-4, không chỉ `train_model`. Trước đó repo gated sẽ chỉ fail ở nhánh
+  eval/baseline.
+- `retrieval.seed_cache_dir` trỏ vào data volume + `data_volume.commit()`
+  sau eval — nếu không, vision seed bị vứt cùng container và lần chạy sau
+  trả lại toàn bộ VLM call cho đúng kết quả cũ.
+- `evaluate_model` nhận `condition` và `base_model`, ghi condition vào tên
+  file kết quả để 4 điều kiện không đè lên nhau.
+- `--smoke-level 0` trước đây thoát vòng lặp ngay rồi vẫn in "✅ passed" —
+  báo thành công trong khi không chạy gì. Giờ reject.
+
+`ruff` vào CI (`F,E,W,I,B,UP`, bỏ E501 vì đã có line-length). Cố tình gọn:
+bắt lỗi thật — tên chưa định nghĩa, import thừa, mutable default — chứ
+không đem chuyện format ra review lại.
+
 ### Còn lại
 
 **M3**: `SeedProvider` interface, Qwen3-VL vision-seeding có cache, fallback

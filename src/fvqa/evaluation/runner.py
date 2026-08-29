@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 from fvqa.config import Config
 from fvqa.data.samples import IMAGE_TOKEN
@@ -29,7 +30,7 @@ def load_split(path: str) -> list[dict[str, Any]]:
         raise FileNotFoundError(
             f"split file not found: {path}. Run `fvqa prepare` first."
         )
-    with open(path, "r", encoding="utf-8") as handle:
+    with open(path, encoding="utf-8") as handle:
         return json.load(handle)
 
 

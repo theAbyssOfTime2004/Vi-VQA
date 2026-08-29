@@ -20,7 +20,8 @@ import json
 import logging
 import os
 import random
-from typing import Any, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Any
 
 from fvqa.config import SplitConfig
 

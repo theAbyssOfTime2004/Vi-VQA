@@ -23,11 +23,14 @@ def _git(*args: str, cwd: Path) -> subprocess.CompletedProcess:
     )
 
 
-@pytest.fixture
-def fake_trainer_remote(tmp_path):
-    """A local repo with two commits, the entry point added in the second."""
-    remote = tmp_path / "remote"
-    remote.mkdir()
+@pytest.fixture(scope="session")
+def fake_trainer_remote(tmp_path_factory):
+    """A local repo with two commits, the entry point added in the second.
+
+    Session-scoped: every test only ever clones *from* this repo, never
+    writes to it, and building it costs several seconds of `git commit`.
+    """
+    remote = tmp_path_factory.mktemp("remote")
     _git("init", "-q", cwd=remote)
     _git("config", "user.email", "test@example.com", cwd=remote)
     _git("config", "user.name", "test", cwd=remote)

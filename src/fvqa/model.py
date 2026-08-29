@@ -229,7 +229,7 @@ class VQAModel:
         config: Config,
         device_map: str = "auto",
         base_model_id: str | None = None,
-    ) -> "VQAModel":
+    ) -> VQAModel:
         model, processor = load_model(
             model_path, config, device_map=device_map, base_model_id=base_model_id
         )
@@ -336,7 +336,7 @@ class VQAModel:
 
         trimmed = [
             output[len(prompt_ids) :]
-            for prompt_ids, output in zip(inputs.input_ids, generated)
+            for prompt_ids, output in zip(inputs.input_ids, generated, strict=True)
         ]
         answer = self.processor.batch_decode(
             trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False

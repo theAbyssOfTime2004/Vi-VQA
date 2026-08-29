@@ -26,7 +26,8 @@ import json
 import logging
 import os
 import re
-from typing import Any, Protocol, Sequence
+from collections.abc import Sequence
+from typing import Any, Protocol
 
 __all__ = [
     "SEED_PROMPT",
@@ -147,7 +148,7 @@ class SeedCache:
         if not os.path.isfile(path):
             return None
         try:
-            with open(path, "r", encoding="utf-8") as handle:
+            with open(path, encoding="utf-8") as handle:
                 payload = json.load(handle)
         except (OSError, json.JSONDecodeError):
             # A corrupt cache entry must not end the run; recompute it.

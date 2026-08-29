@@ -24,6 +24,9 @@ jobs:
       - name: Install fvqa (dev extra only — no torch/transformers)
         run: pip install -e '.[dev]'
 
+      - name: ruff check
+        run: ruff check .
+
       - name: pytest
         run: pytest -q
 

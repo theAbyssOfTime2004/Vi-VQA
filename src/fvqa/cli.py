@@ -15,7 +15,7 @@ import json
 import logging
 import os
 import sys
-from typing import Sequence
+from collections.abc import Sequence
 
 from fvqa.config import ConfigError, load_config
 from fvqa.evaluation.conditions import CONDITIONS

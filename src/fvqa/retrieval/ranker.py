@@ -19,7 +19,8 @@ answer on its own, which would quietly move the thing being measured.
 
 from __future__ import annotations
 
-from typing import Protocol, Sequence
+from collections.abc import Sequence
+from typing import Protocol
 
 from fvqa.evaluation.metrics import tokenize
 from fvqa.retrieval.types import EntityCandidate, RetrievedFact

@@ -34,7 +34,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any, Iterable, Mapping
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 from fvqa.config import Config, SplitConfig
 from fvqa.data.grounding import apply_grounding
@@ -66,7 +67,7 @@ def _read_json(path: str) -> dict[str, Any]:
             f"{path} not found. Download and extract the FVQA release first: "
             "https://www.dropbox.com/s/iyz6l7jhbt6jb7q/new_dataset_release.zip?dl=1"
         )
-    with open(path, "r", encoding="utf-8") as handle:
+    with open(path, encoding="utf-8") as handle:
         return json.load(handle)
 
 
@@ -92,7 +93,7 @@ def load_split_images(root: str, fold: int, split: str) -> set[str]:
     path = os.path.join(root, NAME_LISTS_DIRNAME, f"{split}_list_{fold}.txt")
     if not os.path.isfile(path):
         raise FileNotFoundError(f"{path} not found")
-    with open(path, "r", encoding="utf-8") as handle:
+    with open(path, encoding="utf-8") as handle:
         return {line.strip() for line in handle if line.strip()}
 
 

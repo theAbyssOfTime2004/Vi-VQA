@@ -19,8 +19,8 @@ import math
 import re
 import unicodedata
 from collections import Counter
+from collections.abc import Callable, Iterable, Sequence
 from difflib import SequenceMatcher
-from typing import Callable, Iterable, Sequence
 
 __all__ = [
     "AVAILABLE_METRICS",
@@ -157,7 +157,7 @@ def corpus_bleu(
     pred_length = 0
     ref_length = 0
 
-    for prediction, reference in zip(predictions, references):
+    for prediction, reference in zip(predictions, references, strict=True):
         pred_tokens = tokenize(prediction)
         ref_tokens = tokenize(reference)
         pred_length += len(pred_tokens)
@@ -241,7 +241,7 @@ def cider(
         return vector, math.sqrt(norm)
 
     scores = []
-    for pred, ref in zip(pred_tokens, ref_tokens):
+    for pred, ref in zip(pred_tokens, ref_tokens, strict=True):
         # Length penalty discourages padding the answer with filler.
         length_delta = len(pred) - len(ref)
         penalty = math.exp(-(length_delta**2) / (2 * sigma**2))
@@ -302,7 +302,7 @@ def compute_metrics(
         if name in _PER_SAMPLE:
             fn = _PER_SAMPLE[name]
             if predictions:
-                total = sum(fn(p, r) for p, r in zip(predictions, references))
+                total = sum(fn(p, r) for p, r in zip(predictions, references, strict=True))
                 results[name] = 100.0 * total / len(predictions)
             else:
                 results[name] = 0.0

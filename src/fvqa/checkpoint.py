@@ -161,7 +161,7 @@ def inspect_checkpoint(path: str) -> CheckpointInfo:
 
     adapter_config_path = os.path.join(path, ADAPTER_CONFIG)
     try:
-        with open(adapter_config_path, "r", encoding="utf-8") as handle:
+        with open(adapter_config_path, encoding="utf-8") as handle:
             adapter_config = json.load(handle)
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"could not read {adapter_config_path}: {error}") from error

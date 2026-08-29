@@ -208,6 +208,28 @@ resolve ra entity nào, fact nào vào prompt, supporting fact có sống sót
 không. Recall đó là cận trên của phần grounding có thể đóng góp — model
 không dùng được fact mà retrieval chưa từng đưa cho nó.
 
+## Chạy trên Modal
+
+```bash
+pip install modal && modal token new
+modal secret create huggingface-secret HF_TOKEN=hf_...
+
+modal run scripts/train_on_modal.py --step smoke      # 4 mức, rẻ trước
+modal run scripts/train_on_modal.py --step smoke --smoke-level 2   # chỉ mức không cần GPU
+modal run scripts/train_on_modal.py --step prepare
+modal run scripts/train_on_modal.py --step train
+modal run scripts/train_on_modal.py --step baseline --condition no-context
+```
+
+| smoke | kiểm tra | GPU |
+|---|---|---|
+| 1 | import + config + mini-graph | không |
+| 2 | tải dataset + prepare + format split | không |
+| 3 | base model load + generate | có |
+| 4 | 2 optimizer step + reload lại adapter | có |
+
+Dừng ở mức đầu tiên fail — mức fail làm mọi mức trên nó vô nghĩa.
+
 ## Yêu cầu phần cứng
 
 | GPU | `model.tuning_method` | Thời gian (2 epoch) |

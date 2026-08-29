@@ -3,8 +3,6 @@ loader (currently just FVQA) builds samples on top of."""
 
 import json
 
-import pytest
-
 from fvqa.config import Config
 from fvqa.data.samples import assign_splits, write_split
 
