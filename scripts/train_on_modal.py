@@ -94,12 +94,24 @@ VOLUME_OVERRIDES = [
 
 
 def _load(extra_overrides: list[str] | None = None):
-    """Load the shared config with volume paths applied."""
-    from fvqa.config import load_config
+    """Load the shared config with volume paths applied.
+
+    A `ConfigError` is re-raised as a plain `RuntimeError` because the
+    caller is on another machine. Modal pickles the remote exception and
+    unpickles it locally, and `fvqa` is not installed there — so a
+    `ConfigError` arrives as "ModuleNotFoundError: No module named 'fvqa'"
+    wrapped around the real message, which buries what actually went
+    wrong. RuntimeError is in the standard library, so it survives the
+    trip intact.
+    """
+    from fvqa.config import ConfigError, load_config
     from fvqa.utils import setup_logging
 
     setup_logging()
-    return load_config(overrides=VOLUME_OVERRIDES + list(extra_overrides or []))
+    try:
+        return load_config(overrides=VOLUME_OVERRIDES + list(extra_overrides or []))
+    except ConfigError as error:
+        raise RuntimeError(f"config error: {error}") from None
 
 
 def _login() -> None:

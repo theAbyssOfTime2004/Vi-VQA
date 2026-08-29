@@ -157,3 +157,67 @@ def test_non_numeric_string_is_still_rejected(tmp_path):
     path = write_config(tmp_path, {"training": {"learning_rate": "fast"}})
     with pytest.raises(ConfigError, match="must be a number"):
         load_config(path)
+
+
+class TestYamlBooleanAliases:
+    """YAML 1.1 resolves a bare `no` to False. That is wrong here.
+
+    HuggingFace's `eval_strategy` and `save_strategy` take the *string*
+    "no", so `--set training.eval_strategy=no` used to yield False and
+    die in validation with "must be a string, got False" — after the
+    container had started and the model had begun loading.
+    """
+
+    @pytest.mark.parametrize("field", ["eval_strategy", "save_strategy"])
+    def test_no_stays_a_string_in_an_override(self, repo_config, field):
+        config = load_config(repo_config, overrides=[f"training.{field}=no"])
+        assert getattr(config.training, field) == "no"
+
+    @pytest.mark.parametrize("field", ["eval_strategy", "save_strategy"])
+    def test_no_stays_a_string_in_the_config_file(self, tmp_path, field):
+        path = tmp_path / "config.yaml"
+        path.write_text(f"training:\n  {field}: no\n", encoding="utf-8")
+        assert getattr(load_config(str(path)).training, field) == "no"
+
+    @pytest.mark.parametrize("word", ["yes", "on", "off"])
+    def test_the_other_yaml_1_1_aliases_stay_strings_too(self, tmp_path, word):
+        # Same trap, same fix — checked so a future loader change cannot
+        # quietly reinstate only some of them.
+        path = tmp_path / "config.yaml"
+        path.write_text(f"training:\n  report_to: {word}\n", encoding="utf-8")
+        assert load_config(str(path)).training.report_to == word
+
+    @pytest.mark.parametrize(
+        "literal, expected",
+        [("true", True), ("false", False), ("True", True), ("FALSE", False)],
+    )
+    def test_real_booleans_still_parse(self, repo_config, literal, expected):
+        config = load_config(repo_config, overrides=[f"training.bf16={literal}"])
+        assert config.training.bf16 is expected
+
+    def test_a_boolean_field_given_no_now_fails_loudly(self, tmp_path):
+        # The cost of the fix: `bf16: no` is a string now. That is a clear
+        # type error rather than a silently accepted value, which is the
+        # trade this loader is making.
+        path = tmp_path / "config.yaml"
+        path.write_text("training:\n  bf16: no\n", encoding="utf-8")
+        with pytest.raises(ConfigError, match="must be a boolean"):
+            load_config(str(path))
+
+    def test_the_smoke_overrides_load(self, repo_config):
+        # The exact override list scripts/smoke_gpu.sh and the Modal
+        # smoke_train function pass. This is the case that failed on a
+        # real GPU run.
+        config = load_config(
+            repo_config,
+            overrides=[
+                "training.max_steps=2",
+                "training.save_steps=1",
+                "training.eval_strategy=no",
+                "training.load_best_model_at_end=false",
+                "training.logging_steps=1",
+            ],
+        )
+        assert config.training.max_steps == 2
+        assert config.training.eval_strategy == "no"
+        assert config.training.load_best_model_at_end is False

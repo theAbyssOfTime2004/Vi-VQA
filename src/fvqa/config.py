@@ -14,6 +14,7 @@ from __future__ import annotations
 import dataclasses
 import functools
 import os
+import re
 import types
 import typing
 from collections.abc import Mapping, Sequence
@@ -22,6 +23,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+_BOOL_TAG = "tag:yaml.org,2002:bool"
 
 __all__ = [
     "Config",
@@ -44,6 +47,41 @@ __all__ = [
 
 class ConfigError(ValueError):
     """Raised when the configuration file is malformed."""
+
+
+# --------------------------------------------------------------------------
+# YAML loading
+# --------------------------------------------------------------------------
+
+
+class _Loader(yaml.SafeLoader):
+    """SafeLoader without YAML 1.1's `yes`/`no`/`on`/`off` boolean aliases.
+
+    YAML 1.1 resolves a bare `no` to False, which is wrong for every
+    config value here that happens to spell a word: HuggingFace's
+    `eval_strategy` and `save_strategy` take the *string* "no", so
+    `--set training.eval_strategy=no` silently produced `False` and the
+    run died in validation with "must be a string, got False".
+
+    YAML 1.2 dropped these aliases for exactly this reason. `true` and
+    `false` still parse as booleans; `no` is now the string it looks
+    like. A config that meant the boolean and wrote `no` gets a clear
+    type error instead of a silent wrong value.
+    """
+
+
+_Loader.yaml_implicit_resolvers = {
+    prefix: [(tag, regexp) for tag, regexp in resolvers if tag != _BOOL_TAG]
+    for prefix, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+_Loader.add_implicit_resolver(
+    _BOOL_TAG, re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"), list("tTfF")
+)
+
+
+def _parse_yaml(source: Any) -> Any:
+    """Parse YAML with the aliases above removed."""
+    return yaml.load(source, Loader=_Loader)  # noqa: S506 - _Loader derives from SafeLoader
 
 
 # --------------------------------------------------------------------------
@@ -595,6 +633,10 @@ def apply_overrides(raw: dict[str, Any], overrides: Sequence[str]) -> dict[str, 
 
     Values are parsed as YAML, so `--set training.bf16=false` yields a
     boolean and `--set data.splits.val=0.1` yields a float.
+
+    `no`, `yes`, `on` and `off` stay strings — see :class:`_Loader`. That
+    matters here more than anywhere: `--set training.eval_strategy=no` is
+    a string in every sense the trainer cares about.
     """
     for override in overrides:
         if "=" not in override:
@@ -614,7 +656,7 @@ def apply_overrides(raw: dict[str, Any], overrides: Sequence[str]) -> dict[str, 
                 nxt = {}
                 cursor[part] = nxt
             cursor = nxt
-        cursor[parts[-1]] = yaml.safe_load(value)
+        cursor[parts[-1]] = _parse_yaml(value)
     return raw
 
 
@@ -636,7 +678,7 @@ def load_config(
         raise ConfigError(f"config file not found: {config_path}")
 
     with open(config_path, encoding="utf-8") as handle:
-        raw = yaml.safe_load(handle)
+        raw = _parse_yaml(handle)
 
     if raw is None:
         raw = {}
